@@ -1,0 +1,255 @@
+%% PerimeterCoverage.m
+% Computes, for each ICCD frame of the full electrode:
+%   (1) Total plasma area [mm^2]
+%   (2) Ignited open-perimeter fraction zeta(t) and length [mm]
+% Then aligns zeta with the applied voltage so it can be compared with dQ/dV.
+%
+% Assumes the same Pimax CSV format / rotation / crop treatment as the
+% single-hex script (ImageTreatment.mat). Runs at script level in the
+% workspace like your other pipelines.
+
+clear
+close all
+
+%% ---------------- User settings ----------------
+path            = uigetdir('E:\MATLAB\MATLAB\Data\2023\FullImagingDataSet\Fulldata\12_19_23Meanenergy\BigHex\SweepOverTime\3372usSweep\Data');   % folder of frame CSVs
+BackgroundImagePath = "E:\MATLAB\MATLAB\Data\2023\FullImagingDataSet\Fulldata\12_19_23Meanenergy\BigHex\SweepOverTime\3372usSweep\BigHex2ussweep337LineBG 2023 December 19 17_28_14.csv";
+PictureDt       = 2;         % us per frame
+IgnitionCounts  = 200;       % counts above background = "plasma on"
+                             % (set from dark-frame noise: ~5-6 sigma)
+BandWidthPx     = 4;         % px tolerance between emission ring and skeleton
+MinBlobPx       = 10;        % despeckle: ignore blobs smaller than this
+RefFrameMode    = 'LightImage';   % 'union' of all frames, or an integer frame no.
+                             % Use a frame like your panel clsE (all cells lit,
+                             % none saturated) if you want a specific one.
+SkeletonMaskMode = 'load';   % Skeleton Mask mode Load,manual,interpolate
+PlotAll = 'None';             % Plot all the data
+LightImagePath = "E:\MATLAB\MATLAB\Data\2023\FullImagingDataSet\Fulldata\12_19_23Meanenergy\BigHex\LightImageBigHex 2023 December 19 17_31_04.csv";
+ImageAdjustments = 
+
+
+%% ---------------- Read background ----------------
+opts = delimitedTextImportOptions("NumVariables", 3);
+opts.DataLines = [2, Inf];  opts.Delimiter = ",";
+opts.VariableNames = ["Y","X","I"];
+opts.VariableTypes = ["double","double","double"];
+opts.ExtraColumnsRule = "ignore"; opts.EmptyLineRule = "read";
+
+BackgroundMatrix = table2array(readtable(BackgroundImagePath, opts));
+Background = reshape(BackgroundMatrix(:,3), 1024, 1024)';   % row-major restructure
+% Background = imrotate(Background, RotationDegrees, 'bilinear', 'crop');
+Background = imcrop(Background, CropRect);
+
+
+%% ---------------- Create Conversion Factor ---------------------------
+%% Find ConversionFactor if Logic Conversion Factor is set to 'yes'
+if strcmp(ImageAdjustments,'yes') == 1
+    % Rotate Image
+    figure;
+    imshow(LightImage,[1,max(max(LightImage))])
+
+    % Crop Image
+
+    disp('Do you want to skip Image Cropping')
+    LogicYes = input('Yes or no','s');
+    if strcmpi(LogicYes,'no') == 1
+        clf
+        figure;
+        image(LightImageTemp,"CDataMapping","scaled");colormap(gray)
+        h = imrect(gca,[500 500 500 500]);
+        Position = wait(h); % returns coordinates in "position" when user doubleclicks on rectangle
+        CropLightImage = imcrop(LightImageTemp,Position);
+        % [CropLightImage,croprect] = imcrop;
+    else
+        CropLightImage = LightImageTemp;
+        Position = [1,1,1023,1023];
+    end
+
+    %% Conversion Factor
+    clf
+    figure;
+    image(CropLightImage,"CDataMapping","scaled");colormap(gray)
+    % Final Image Adjustments
+    for n = 1:5
+        disp(['Please indentify two distance points ',num2str(5-(n-1)),' more times'])
+        [x,y] = ginput(2);
+        Pixels(n) = sqrt((x(2)-x(1))^2 + (y(2)-y(1))^2);
+        disp(['Pixel length = ',num2str(Pixels)])
+    end
+    Distance = input('Distance in mm = ');
+    ConversionFactor = mean(Distance./Pixels); %% Conversion factor in mm/pixel
+    ImageHandeling = struct;
+    ImageHandeling.Crop = Position;
+    ImageHandeling.ConversionFactor = ConversionFactor;
+    save('ImageTreatment.mat',"ImageHandeling")
+else
+    load('ImageTreatment.mat')   % same rotate/crop/ConversionFactor as before
+    CropRect         = ImageHandeling.crop;
+    ConversionFactor = ImageHandeling.ConversionFactor;  % mm/px
+
+end
+
+
+
+
+%% ---------------- Read all frames ----------------
+FileList = dir(fullfile(path,'*.csv'));
+Nfiles   = length(FileList);
+[Ny,Nx]  = size(Background);
+FinalData = zeros(Nfiles, Ny, Nx);
+
+for nn = 1:Nfiles
+    T = table2array(readtable(fullfile(FileList(nn).folder,FileList(nn).name), opts));
+    Img = reshape(T(:,3), 1024, 1024)';
+    % Img = imrotate(Img, RotationDegrees, 'bilinear', 'crop');
+    Img = imcrop(Img, CropRect);
+    FinalData(nn,:,:) = medfilt2(Img - Background, [3,3]);
+end
+TimeIndex = (0:Nfiles-1) * PictureDt;   % us
+
+%% ---------------- Build the open-perimeter skeleton ----------------
+% Reference image: every cell edge lit at some point in the cycle.
+if strcmp(RefFrameMode,'union') == 1
+    RefImage = squeeze(max(FinalData,[],1));
+elseif strcmp(RefFrameMode,'LightImage') == 1
+    T = table2array(readtable(LightImagePath, opts));
+    LightImage = reshape(T(:,3), 1024, 1024)';
+    LightImage = imcrop(LightImage,CropRect);
+    RefImage = LightImage;
+else
+    RefImage = squeeze(FinalData(RefFrameMode,:,:));
+end
+
+if strcmp(SkeletonMaskMode,'manual') == 1
+figure; imshow(RefImage, [0, max(RefImage(:))]); hold on
+title('Trace each hexagon perimeter. Double-click / Enter to finish each one.')
+
+PerimMask = false(size(RefImage));   % accumulator
+
+% ---- Option A: polygon per hexagon (click the 6 corners) ----
+Ncells = 33;                         % however many you have
+for k = 1:Ncells
+    h = drawpolygon('Color','c');    % click 6 vertices, double-click to close
+    ringMask = bwperim(createMask(h));   % OUTLINE only, not filled
+    PerimMask = PerimMask | ringMask;
+end
+
+
+% ---- Option B: freehand trace instead (swap into the loop) ----
+% h = drawfreehand('Color','c','Closed',true);
+% ringMask = bwperim(createMask(h));
+% PerimMask = PerimMask | ringMask;
+
+Skeleton = PerimMask;
+PerimTotalPx = nnz(Skeleton);
+save('PerimeterSkeleton.mat','Skeleton','PerimTotalPx')
+
+elseif strcmp(SkeletonMaskMode,'interpolate')
+    RefMask = RefImage > IgnitionCounts;
+    RefMask = bwareaopen(RefMask, MinBlobPx);
+    RefMask = imclose(RefMask, strel('disk',2));
+    Skeleton = bwskel(RefMask);              % 1-px-wide trace of every hex edge
+    % (older MATLAB: Skeleton = bwmorph(RefMask,'thin',Inf); )
+
+    % Remove the outer carrier arc / anything that is not a hexagon ring:
+    % keep connected skeleton pieces whose bounding box matches a single cell.
+    CC = bwconncomp(Skeleton);
+    S  = regionprops(CC,'BoundingBox');
+    CellSizePx = 5 / ConversionFactor;       % <-- rough hex cell size in mm; EDIT
+    Keep = false(1,CC.NumObjects);
+    for k = 1:CC.NumObjects
+        bb = S(k).BoundingBox;
+        Keep(k) = bb(3) < 2*CellSizePx && bb(4) < 2*CellSizePx;
+    end
+    Skeleton = ismember(labelmatrix(CC), find(Keep));
+
+
+
+elseif strcmp(SkeletonMaskMode,'load')
+    load('PerimeterSkeleton.mat')
+end
+
+
+
+
+PerimTotalPx = nnz(Skeleton);
+PerimTotalMM = PerimTotalPx * ConversionFactor;
+disp(['Total open perimeter = ', num2str(PerimTotalMM), ' mm'])
+
+% Sanity check against geometry: N_cells * 6 * side length should be close.
+
+%% ---------------- Per-frame coverage and area ----------------
+Band = strel('disk', BandWidthPx);
+Zeta        = zeros(1,Nfiles);   % ignited perimeter fraction
+PerimLitMM  = zeros(1,Nfiles);   % ignited perimeter length, mm
+PlasmaArea  = zeros(1,Nfiles);   % total plasma area, mm^2
+
+for nn = 1:Nfiles
+    Img  = squeeze(FinalData(nn,:,:));
+    Mask = bwareaopen(Img > IgnitionCounts, MinBlobPx);
+    PlasmaArea(nn) = nnz(Mask) * ConversionFactor^2;
+
+    LitSkel = imdilate(Mask, Band) & Skeleton;
+    Zeta(nn)       = nnz(LitSkel) / PerimTotalPx;
+    PerimLitMM(nn) = nnz(LitSkel) * ConversionFactor;
+end
+
+%% ---------------- QC overlay (spot-check a few frames) ----------------
+CheckFrames = round(linspace(2, Nfiles-1, 6));
+figure
+for k = 1:6
+    nn = CheckFrames(k);
+    subplot(2,3,k)
+    Img  = squeeze(FinalData(nn,:,:));
+    imshow(Img, [0, 4000]); colormap(gca,'gray'); hold on
+    Mask = bwareaopen(Img > IgnitionCounts, MinBlobPx);
+    Lit  = imdilate(Mask, Band) & Skeleton;
+    Dark = Skeleton & ~Lit;
+    [yy,xx] = find(Lit);  plot(xx,yy,'.g','MarkerSize',2)
+    [yy,xx] = find(Dark); plot(xx,yy,'.r','MarkerSize',2)
+    title(['t = ', num2str(TimeIndex(nn)), ' \mus,  \zeta = ', num2str(Zeta(nn),'%.2f')])
+end
+
+% Plot all the figures
+if strcmp(PlotAll,'all') == 1
+for nn = 1:Nfiles
+    figure
+    Img  = squeeze(FinalData(nn,:,:));
+    imshow(Img, [0, 4000]); colormap(gca,'gray'); hold on
+    Mask = bwareaopen(Img > IgnitionCounts, MinBlobPx);
+    Lit  = imdilate(Mask, Band) & Skeleton;
+    Dark = Skeleton & ~Lit;
+    [yy,xx] = find(Lit);  plot(xx,yy,'.g','MarkerSize',2)
+    [yy,xx] = find(Dark); plot(xx,yy,'.r','MarkerSize',2)
+    title(['t = ', num2str(TimeIndex(nn)), ' \mus,  \zeta = ', num2str(Zeta(nn),'%.2f')])
+end
+
+end
+
+%% ---------------- Zeta vs time / voltage ----------------
+figure
+yyaxis left
+plot(TimeIndex, Zeta, 'LineWidth', 2)
+ylabel('Ignited perimeter fraction \zeta')
+yyaxis right
+plot(TimeIndex, PlasmaArea, 'LineWidth', 2)
+ylabel('Plasma area / mm^2')
+xlabel('Time / \mus')
+ax = gca; ax.FontSize = 18;
+
+% Align with oscilloscope trace (same trigger offset convention as before)
+[t,v,c,tr] = OscopeReadin('');
+TriggerOffset = 1.71628e-6;                       % s, edit for this dataset
+FrameTimes = TimeIndex*1e-6 - TriggerOffset;      % s
+Vframe = interp1(t, v, FrameTimes, 'linear', NaN);
+
+figure
+plot(Vframe, Zeta, 'o-', 'LineWidth', 2)
+xlabel('Applied Voltage / V'); ylabel('\zeta')
+ax = gca; ax.FontSize = 18;
+% If ignition thresholds along the perimeter are ~Gaussian distributed,
+% zeta(V) on the rising quarter-cycle should follow a cumulative normal:
+%   zeta(V) = 0.5*(1 + erf((V - mu)/(sqrt(2)*sigmaV)))
+% Fit mu, sigmaV and compare with the width of the dQ/dV transition.
+
+OriginZeta = transpose([TimeIndex; Vframe; Zeta; PerimLitMM; PlasmaArea]);
