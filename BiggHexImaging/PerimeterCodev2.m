@@ -18,14 +18,19 @@ path            = fullfile(BigHexDir,'SweepOverTime','3372usSweep','Data');   % 
 if ~exist(path,'dir'), path = uigetdir(pwd,'Choose the frame CSV folder'); end
 BackgroundImagePath = fullfile(BigHexDir,'SweepOverTime','3372usSweep','BigHex2ussweep337LineBG 2023 December 19 17_28_14.csv');
 ScopeFile = fullfile(RepoRoot,'Data','ICCD_ImagingData','ExampleTraces','BigHexOscope','PlasmaOn','bighex5v3000hz_ALL.csv');
+ScopeOffFile = fullfile(RepoRoot,'Data','ICCD_ImagingData','ExampleTraces','BigHexOscope','PlasmaOff','bigkex1vpp3000hz_ALL.csv');
 % Gate delay -> scope time. The CSVs do not store the sweep's starting delay.
-% 'auto' puts the end of the first emission hump on a voltage extremum of
-% FirstHumpPolarity (discharge stops when |V| stops rising). The old fixed
+% 'auto' puts the end of the first emission hump on an extremum of
+% FirstHumpPolarity (discharge stops when |U| stops rising). The old fixed
 % 1.71628 us offset leaves the light running ~50 us past each extremum.
+% AlignTo = 'Ur' uses the electrode voltage Ur = V - I*Resr (paper Eq 1), which
+% the discharge follows; its extrema lag the applied V by ~7 us at 3000 Hz.
 ScopeTimeShift    = 'auto';      % 'auto' or a number in s (scope t = frame time + shift)
+AlignTo           = 'Ur';        % 'Ur' (electrode voltage) or 'V' (applied)
 FirstHumpPolarity = 'negative';  % paper Fig 8
 Fdrive = 3000;                   % Hz
 AmpGain = 500;                   % V/V
+CurrentGain = 6/1000;            % A/V
 PictureDt       = 2;         % us per frame
 IgnitionCountsNegative  = 3000;       % counts above background = "plasma on"
 IgnitionCountsPositive  = 1580;                             % (set from dark-frame noise: ~5-6 sigma)
@@ -358,12 +363,18 @@ ylabel('Plasma area / mm^2')
 xlabel('Time / \mus')
 ax = gca; ax.FontSize = 18;
 
-% Align with the oscilloscope trace
+% Align with the oscilloscope trace, on the electrode voltage Ur = V - I*Resr
 Scope = readmatrix(ScopeFile,'NumHeaderLines',11);
 t = Scope(:,1);
 v = Scope(:,2)*AmpGain;
 dt = median(diff(t));
-vs = movmean(v,round(5e-6/dt));
+cur = Scope(:,3)*CurrentGain;
+NperT = round(1/Fdrive/dt);
+cur = cur - mean(cur(1:floor(numel(cur)/NperT)*NperT));   % probe offset, whole periods
+Resr = OffMeasurementResr(ScopeOffFile,AmpGain,CurrentGain,Fdrive);
+ur = v - cur*Resr;
+fprintf('Resr = %.2f kOhm from the off trace\n',Resr/1e3);
+if strcmpi(AlignTo,'Ur'), vs = movmean(ur,round(5e-6/dt)); else, vs = movmean(v,round(5e-6/dt)); end
 [~,iMax] = findpeaks( vs,'MinPeakDistance',round(0.6/Fdrive/dt));
 [~,iMin] = findpeaks(-vs,'MinPeakDistance',round(0.6/Fdrive/dt));
 if ischar(ScopeTimeShift) && strcmpi(ScopeTimeShift,'auto')
@@ -378,12 +389,12 @@ if ischar(ScopeTimeShift) && strcmpi(ScopeTimeShift,'auto')
 end
 fprintf('Scope time shift = %.1f us\n',ScopeTimeShift*1e6);
 FrameTimes = (TimeIndex + PictureDt/2)*1e-6 + ScopeTimeShift;   % s, gate centre
-Vframe = interp1(t, v, FrameTimes, 'linear', NaN);
-VframeOld = interp1(t, v, TimeIndex*1e-6 - 1.71628e-6, 'linear', NaN);   % old offset, for comparison
+Vframe = interp1(t, ur, FrameTimes, 'linear', NaN);   % electrode voltage Ur at each frame
+VframeOld = interp1(t, v, TimeIndex*1e-6 - 1.71628e-6, 'linear', NaN);   % old: applied V, old offset
 
 figure
 plot(Vframe, Zeta, 'o-', 'LineWidth', 2)
-xlabel('Applied Voltage / V'); ylabel('\zeta')
+xlabel('U_r / V'); ylabel('\zeta')
 ax = gca; ax.FontSize = 18;
 % If ignition thresholds along the perimeter are ~Gaussian distributed,
 % zeta(V) on the rising quarter-cycle should follow a cumulative normal:
@@ -408,4 +419,16 @@ for n = 1:Nfiles
 end
 figure;
 plot(TimeIndex,A)
-   
+
+
+%% Local functions
+function Resr = OffMeasurementResr(File,AmpGain,CurrentGain,f0)
+% Equivalent series resistance from a plasma-off trace: sine fits of V and I
+% at the drive frequency, Resr = real(V/I)
+M = readmatrix(File,'NumHeaderLines',11);
+t = M(:,1);  V = M(:,2)*AmpGain;  I = M(:,3)*CurrentGain;
+Basis = @(f) [sin(2*pi*f*t) cos(2*pi*f*t) ones(size(t))];
+f = fminsearch(@(f) norm(V - Basis(f)*(Basis(f)\V)),f0,optimset('TolX',1e-3,'Display','off'));
+cV = Basis(f)\V;  cI = Basis(f)\I;
+Resr = real((cV(2) - 1i*cV(1))/(cI(2) - 1i*cI(1)));
+end

@@ -47,6 +47,7 @@ DataRoot = fullfile(RepoRoot,'Data','FullImagingDataSet','Fulldata','12_19_23Mea
 SweepDir337 = fullfile(DataRoot,'SweepOverTime','3372usSweep');
 SweepDir391 = fullfile(DataRoot,'SweepOverTime','3912usSweep');
 ScopeFile   = fullfile(RepoRoot,'Data','ICCD_ImagingData','ExampleTraces','BigHexOscope','PlasmaOn','bighex5v3000hz_ALL.csv');
+ScopeOffFile = fullfile(RepoRoot,'Data','ICCD_ImagingData','ExampleTraces','BigHexOscope','PlasmaOff','bigkex1vpp3000hz_ALL.csv');
 SpecFile    = fullfile(RepoRoot,'Data','ICCD_ImagingData','Echelledata','AbsoultelyCalibratedtrial', ...
                        'Absoultecalibrationtest','Test','KaptonSmallHex.spa');
 TransFile   = fullfile(RepoRoot,'Data','Stuff','FilterTransmitance.csv');
@@ -81,8 +82,13 @@ GateWidth     = 2;              % us
 % Gate delay -> scope time. The CSVs do not record the sweep's starting delay,
 % and the 1.7 us offset in PerimeterCodev2.m leaves the light running ~50 us
 % past each voltage extremum, which a DBD cannot do. 'auto' lines the end of
-% the first emission hump up with a voltage extremum of the polarity below.
+% the first emission hump up with an extremum of the polarity below.
+% AlignTo = 'Ur' uses the voltage across the electrode, Ur = V - I*Resr (paper
+% Eq 1): the discharge follows Ur, whose extrema lag the applied voltage V by
+% atan(w*Resr*Coff)/w (~7 us here). Fitting the imaged plasma area to dQp/dUr
+% (LocationCapacitanceModel.m) independently gives the same 7 us.
 ScopeTimeShift    = 'auto';     % 'auto' or a number in s (scope t = gate + shift)
+AlignTo           = 'Ur';       % 'Ur' (electrode voltage) or 'V' (applied, before 10/2026)
 FirstHumpPolarity = 'negative'; % paper Fig 8: first half-wave imaged is negative
 AmpGain       = 500;            % V/V, Trek voltage monitor
 CurrentGain   = 6;              % mA/V, Trek current monitor
@@ -231,14 +237,25 @@ NperT    = round(1/Fdrive/dtScope);
 Nwhole   = floor(numel(IScope)/NperT)*NperT;
 IScope   = IScope - mean(IScope(1:Nwhole));
 
+% Voltage across the electrode, Ur = V - I*Resr, with Resr from the off trace
+[Resr,Coff] = OffMeasurement(ScopeOffFile,AmpGain,CurrentGain/1000,Fdrive);
+UrScope  = VScope - IScope/1000*Resr;
+fprintf('Off measurement: Resr = %.2f kOhm, Coff = %.1f pF; Ur lags V by %.1f us\n', ...
+        Resr/1e3,Coff*1e12,atan(2*pi*Fdrive*Resr*Coff)/(2*pi*Fdrive)*1e6);
+switch lower(AlignTo)
+    case 'ur', USync = UrScope;
+    case 'v',  USync = VScope;
+    otherwise, error('AlignTo must be ''Ur'' or ''V''.');
+end
+
 % Emission humps: runs of gates with total 337 light above 1% of the maximum
 Tot337 = double(squeeze(sum(S337,[1 2])));
 On     = Tot337(:)' > 0.01*max(Tot337);
 HumpEnd   = find(On & ~[On(2:end) false]);
 HumpStart = find(On & ~[false On(1:end-1)]);
-VSmooth = movmean(VScope,round(5e-6/dtScope));
-[~,iMax] = findpeaks(VSmooth, 'MinPeakDistance',round(0.6/Fdrive/dtScope));
-[~,iMin] = findpeaks(-VSmooth,'MinPeakDistance',round(0.6/Fdrive/dtScope));
+USmooth = movmean(USync,round(5e-6/dtScope));
+[~,iMax] = findpeaks( USmooth,'MinPeakDistance',round(0.6/Fdrive/dtScope));
+[~,iMin] = findpeaks(-USmooth,'MinPeakDistance',round(0.6/Fdrive/dtScope));
 if ischar(ScopeTimeShift) && strcmpi(ScopeTimeShift,'auto')
     % Discharge stops at the voltage extremum, so the end of hump 1 (+ one
     % gate width) sits on an extremum of FirstHumpPolarity. Of the matching
@@ -253,8 +270,9 @@ if ischar(ScopeTimeShift) && strcmpi(ScopeTimeShift,'auto')
 end
 GateStart = GateDelay*1e-6 + ScopeTimeShift;  % s, scope time of each gate opening
 GateMid   = GateStart + GateWidth*1e-6/2;
-VGate     = interp1(tScope,VScope,GateMid,'linear',NaN);
-dVGate    = interp1(tScope,gradient(VSmooth,dtScope),GateMid,'linear',NaN);
+VGate     = interp1(tScope,VScope,GateMid,'linear',NaN);    % applied voltage
+UrGate    = interp1(tScope,UrScope,GateMid,'linear',NaN);   % electrode voltage
+dVGate    = interp1(tScope,gradient(USmooth,dtScope),GateMid,'linear',NaN);
 % Negative half-wave = powered electrode voltage falling. Each emission hump is
 % assigned as a whole, from the slope at its middle gate: its last gates sit
 % on the voltage extremum where dV/dt ~ 0 and the sign there is noise.
@@ -264,14 +282,14 @@ for h = 1:numel(HumpEnd)
     Mid = round((HumpStart(h) + HumpEnd(h))/2);
     HalfWave(HumpStart(h):HumpEnd(h)) = sign(dVGate(Mid));
 end
-fprintf('Scope time shift: %.1f us (scope t = gate delay + shift)\n',ScopeTimeShift*1e6);
+fprintf('Scope time shift: %.1f us (scope t = gate delay + shift), aligned on %s\n',ScopeTimeShift*1e6,AlignTo);
 for h = 1:numel(HumpEnd)
     tEnd = GateStart(HumpEnd(h)) + GateWidth*1e-6;
     [dMax,~] = min(abs(tScope(iMax) - tEnd));
     [dMin,~] = min(abs(tScope(iMin) - tEnd));
     if HalfWave(HumpEnd(h)) < 0, Pol = 'negative'; else, Pol = 'positive'; end
-    fprintf('  Hump %d: gates %d-%d us, %s half-wave, ends %.1f us from the nearest V max, %.1f us from the nearest V min\n', ...
-            h,GateDelay(HumpStart(h)),GateDelay(HumpEnd(h)),Pol,dMax*1e6,dMin*1e6);
+    fprintf('  Hump %d: gates %d-%d us, %s half-wave, ends %.1f us from the nearest %s max, %.1f us from the nearest min\n', ...
+            h,GateDelay(HumpStart(h)),GateDelay(HumpEnd(h)),Pol,dMax*1e6,AlignTo,dMin*1e6);
 end
 
 %% Section 6 - Echelle anchor and ratio maps
@@ -340,8 +358,8 @@ plot(GateDelay,Tot337/1e6,'b','LineWidth',1.5); hold on
 plot(GateDelay,Tot391/1e6,'r','LineWidth',1.5)
 ylabel('Total counts / 10^6')
 yyaxis right
-plot(GateDelay,VGate/1e3,'k--'); ylabel('Voltage / kV')
-legend('337 nm','391 nm','Applied voltage','Location','best')
+plot(GateDelay,UrGate/1e3,'k--'); ylabel('U_r / kV')
+legend('337 nm','391 nm','Electrode voltage U_r','Location','best')
 xlabel('Gate delay / \mus')
 title(sprintf('Emission and voltage at each gate (scope t = gate + %.1f \\mus)',ScopeTimeShift*1e6))
 nexttile
@@ -398,8 +416,8 @@ if LogicGif == 1
         ylabel('Current / mA'); xlabel('Time / ms')
         xlim(PlotWindow*1e3)
         yyaxis right
-        plot(tScope(InWin)*1e3,VScope(InWin)/1e3,'--','Color',[0.5 0.5 0.5])
-        ylabel('Voltage / kV')
+        plot(tScope(InWin)*1e3,UrScope(InWin)/1e3,'--','Color',[0.5 0.5 0.5])
+        ylabel('U_r / kV')
         ax = gca; ax.FontSize = 12;
         drawnow
         exportgraphics(h,GifFile,'Append',true);
@@ -893,7 +911,7 @@ if LogicSides == 1
         end
         Ignited  = ~isnan(IgnIdx);
         IgnTime  = nan(Nsides,1);  IgnTime(Ignited) = GateDelay(IgnIdx(Ignited));
-        IgnVolt  = nan(Nsides,1);  IgnVolt(Ignited) = VGate(IgnIdx(Ignited));
+        IgnVolt  = nan(Nsides,1);  IgnVolt(Ignited) = UrGate(IgnIdx(Ignited));   % Ur at ignition
         Delay    = IgnTime - median(IgnTime,'omitnan');
         Delayed  = Ignited & Delay >= SideDelayThreshold;
         MatchIdx = round(prctile(IgnIdx(Ignited),SideMatchedPct));
@@ -1016,19 +1034,19 @@ if LogicSides == 1
     tiledlayout(1,2)
     nexttile
     plot(GateDelay,Zeta,'LineWidth',1.5); hold on
-    yyaxis right; plot(GateDelay,VGate/1e3,'k--'); ylabel('Voltage / kV')
+    yyaxis right; plot(GateDelay,UrGate/1e3,'k--'); ylabel('U_r / kV')
     yyaxis left; ylabel('Open perimeter ratio \zeta'); xlabel('Gate delay / \mus')
     nexttile; hold on
     for h = 1:numel(HumpStart)
         g = HumpStart(h):HumpEnd(h);
-        plot(VGate(g),Zeta(g),'o-','MarkerSize',3)
+        plot(UrGate(g),Zeta(g),'o-','MarkerSize',3)
     end
-    xlabel('U / V'); ylabel('\zeta'); box on
+    xlabel('U_r / V'); ylabel('\zeta'); box on
     legend(HWNames(1 + (HalfWave(HumpStart) > 0)),'Location','best')
-    title(sprintf('\\zeta vs applied voltage (scope t = gate + %.0f \\mus)',ScopeTimeShift*1e6))
+    title(sprintf('\\zeta vs electrode voltage (scope t = gate + %.0f \\mus)',ScopeTimeShift*1e6))
     SaveFigure(gcf,OutDir.Perimeter,'OpenPerimeterRatio')
-    writetable(table(GateDelay(:),VGate(:),HalfWave(:),Zeta(:), ...
-               'VariableNames',{'GateDelay_us','Voltage_V','HalfWave','Zeta'}), ...
+    writetable(table(GateDelay(:),UrGate(:),VGate(:),HalfWave(:),Zeta(:), ...
+               'VariableNames',{'GateDelay_us','Ur_V','AppliedV_V','HalfWave','Zeta'}), ...
                fullfile(OutDir.Perimeter,'OpenPerimeterRatio.csv'));
 
     % Cache everything derived from the images, so comparisons and figures
@@ -1036,6 +1054,7 @@ if LogicSides == 1
     % Index 1 / "Old" = stamped hexagons, 2 / no suffix = refitted hexagons.
     Derived = struct('GateDelay',GateDelay,'GateWidth',GateWidth,'HalfWave',HalfWave, ...
         'HumpStart',HumpStart,'HumpEnd',HumpEnd,'ScopeTimeShift',ScopeTimeShift, ...
+        'AlignTo',AlignTo,'Resr',Resr,'Coff',Coff,'UrGate',UrGate,'VGate',VGate, ...
         'OldTriggerOffset',1.71628e-6,'ScopeFile',ScopeFile,'Fdrive',Fdrive, ...
         'AmpGain',AmpGain,'CurrentGain',CurrentGain,'ConversionFactor',ConversionFactor, ...
         'Zeta',Zeta,'ZetaOld',ZetaOld,'PlasmaArea',PlasmaArea,'TotalInt',TotalInt, ...
@@ -1051,12 +1070,25 @@ if LogicSides == 1
         'SideCell',SideCell,'SideNum',SideNum,'SideMid',SideMid,'SideTable',SideTable, ...
         'FilterFactor337',FilterFactor337,'FilterFactor391',FilterFactor391, ...
         'ContaminationMode',ContaminationMode,'EoNCoeff',EoNCoeff, ...
-        'IgnitionCounts',[IgnitionCountsNegative IgnitionCountsPositive]);
+        'IgnitionCounts',[IgnitionCountsNegative IgnitionCountsPositive],'ScopeOffFile',ScopeOffFile);
     save(DerivedFile,'-struct','Derived','-v7.3');
     fprintf('Derived image data cached: %s\n',DerivedFile);
 end
 
 %% Local functions
+function [Resr,Coff] = OffMeasurement(File,AmpGain,CurrentGainA,f0)
+% Equivalent series resistance and off capacitance from a plasma-off trace:
+% sine fits of V and I at the drive frequency, Z = V/I = Resr - j/(w*Coff)
+M = readmatrix(File,'NumHeaderLines',11);
+t = M(:,1);  V = M(:,2)*AmpGain;  I = M(:,3)*CurrentGainA;
+Basis = @(f) [sin(2*pi*f*t) cos(2*pi*f*t) ones(size(t))];
+f = fminsearch(@(f) norm(V - Basis(f)*(Basis(f)\V)),f0,optimset('TolX',1e-3,'Display','off'));
+cV = Basis(f)\V;  cI = Basis(f)\I;
+Z = (cV(2) - 1i*cV(1))/(cI(2) - 1i*cI(1));
+Resr = real(Z);
+Coff = -1/(2*pi*f*imag(Z));
+end
+
 function SaveFigure(fig,Folder,Name)
 % Save a figure as .png and .fig and leave it open, titled with its file name.
 fig.Name = Name;
