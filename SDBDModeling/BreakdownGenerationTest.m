@@ -69,6 +69,7 @@ PeakProminence   = 25;       % pF, for the peaks in dQp/dUr
 ResrOverride     = [];       % [R1600 R3000] in Ohm to replace the off-trace Resr; NaN keeps it
 LossTangent      = 0.019;    % device tan(d) from the Hioki (SDBDCleanVersion.m); 0 = paper's Re(Z)
 IgnOnsetFrac     = 0.10;     % discharge onset = first bin at this share of the branch maximum (held)
+ImagingCache     = fullfile(RepoRoot,'Output','Cache','BigHexDerived.mat');   % ICCD overlay (3 kHz imaging day)
 OnsetMinPeak     = 150;      % pF; onset only reported when the branch reaches this (below, noise sets it)
 MinGenGap        = 500;      % V of swing between accepted generations
 Sweeps(1).GenWindows = [140 260; 300 480; 430 700];   % pF, dQp/dUr window of generations 1-3
@@ -274,18 +275,49 @@ for s = 1:numel(Sweeps)
 end
 writetable(Gen,fullfile(OutDir,'GenerationStaircase.csv'));
 
-EvName = {'Onset','Generation 1','Generation 2','Generation 3'};
+% The staircase starts at the reversal (swing 0). The onset is kept in the CSV
+% and printout only: it marks particularly early ignition regions, not a new
+% generation.
+EvName = {'Reversal','Generation 1','Generation 2','Generation 3'};
+
+% ICCD overlay: positive half-wave gates of the 3 kHz imaging day, as swing
+% since the previous Ur extremum, and the peaks of the image intensity
+Img = struct('Ok',false);
+if exist(ImagingCache,'file')
+    Dc = load(ImagingCache,'UrGate','HalfWave','HumpStart','HumpEnd','Tot337','SideProf','SideLit','DepthMM');
+    h  = find(Dc.HalfWave(Dc.HumpStart) > 0,1);
+    gI = Dc.HumpStart(h):Dc.HumpEnd(h);
+    Img.Ok    = true;
+    Img.Amp   = -min(Dc.UrGate);                    % previous extremum (Ur minimum)
+    Img.Swing = Dc.UrGate(gI) - min(Dc.UrGate);
+    Img.Tot   = Dc.Tot337(gI)/max(Dc.Tot337(gI));
+    near  = Dc.DepthMM >= 0 & Dc.DepthMM <= 0.25;
+    Edge  = squeeze(mean(Dc.SideProf(:,near,gI,2),2));
+    Lit   = Dc.SideLit(:,gI) >= 0.5;
+    WasLit = [false(size(Lit,1),1) Lit(:,1:end-1)];
+    Img.Edge = arrayfun(@(n) mean(Edge(WasLit(:,n),n)),1:numel(gI));
+    Img.Edge = Img.Edge/max(Img.Edge);
+    [~,l1] = findpeaks(Img.Tot,'MinPeakProminence',0.03);
+    [~,l2] = findpeaks(Img.Edge,'MinPeakProminence',0.03);
+    Img.PkTot  = Img.Swing(l1);
+    Img.PkEdge = Img.Swing(l2);
+    fprintf('\nICCD (3 kHz imaging day, Ur amplitude %.0f V): intensity peaks at swing %s V; edge-brightness peaks at %s V\n', ...
+            Img.Amp,sprintf('%.0f ',Img.PkTot),sprintf('%.0f ',Img.PkEdge));
+end
 EvCol  = [0 0 0; 0.15 0.35 0.85; 0.9 0.45 0.1; 0.85 0.7 0.1];
 for s = 1:numel(Sweeps)
     G = Gen(Gen.Sweep == Sweeps(s).Name,:);
     if isempty(G), continue, end
-    Ev = [G.Onset_V G.Gen1_V G.Gen2_V G.Gen3_V];
+    Ev = [zeros(height(G),1) G.Gen1_V G.Gen2_V G.Gen3_V];
     fprintf('\n%s, positive half-wave staircase (swing since the previous extremum):\n',Sweeps(s).Name);
+    okO = ~isnan(G.Onset_V);
+    fprintf('  (onset of early ignition regions: median %.0f V, IQR %.0f V, n = %d)\n', ...
+            median(G.Onset_V(okO)),iqr(G.Onset_V(okO)),nnz(okO));
     Med = nan(1,4);
     for e = 1:4
         v = Ev(:,e);  ok = ~isnan(v);
         Med(e) = median(v(ok));
-        if nnz(ok) >= 5
+        if e > 1 && nnz(ok) >= 5
             b = SlopeCI(G.UrAmplitude_V(ok),v(ok));
             fprintf('  %-13s n = %2d  median %5.0f V  IQR %4.0f V  slope vs amplitude %+.2f', ...
                     EvName{e},nnz(ok),Med(e),iqr(v(ok)),b);
@@ -302,6 +334,8 @@ for s = 1:numel(Sweeps)
     end
     [Step,ciStep] = SlopeCI(gg,yy);
     fprintf('  staircase fit over generations 1-3: step %.0f V [%.0f, %.0f]\n',Step,ciStep(1),ciStep(2));
+    FirstStep = Med(2);
+    fprintf('  first step (reversal -> generation 1) %.0f V = %.2f x the later step\n',FirstStep,FirstStep/Step);
 
     fig = figure('Color','w','Position',[40 40 1600 520]);
     tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
@@ -311,8 +345,13 @@ for s = 1:numel(Sweeps)
         scatter(G.UrAmplitude_V(ok),Ev(ok,e),26,EvCol(e,:),'filled','MarkerFaceAlpha',0.7)
     end
     for e = 1:4, yline(Med(e),':','Color',EvCol(e,:),'HandleVisibility','off'); end
+    Leg = EvName;
+    if Img.Ok
+        scatter(Img.Amp*ones(size(Img.PkTot)),Img.PkTot,80,'k^','filled')
+        Leg{end+1} = 'ICCD intensity peaks (3 kHz)';
+    end
     xlabel('U_r amplitude of the previous half-wave / V'); ylabel('Swing since the previous extremum / V')
-    legend(EvName,'Location','northwest'); box on; grid on
+    legend(Leg,'Location','northwest'); box on; grid on
     title(sprintf('%s positive half-wave: referenced to the previous extremum',Sweeps(s).Name))
 
     nexttile; hold on
@@ -326,9 +365,17 @@ for s = 1:numel(Sweeps)
         text(e-1.5,(Med(e-1)+Med(e))/2,sprintf('%+.0f V',Med(e)-Med(e-1)),'HorizontalAlignment','center', ...
              'FontWeight','bold','BackgroundColor','w')
     end
+    if Img.Ok
+        % ICCD intensity peaks, beside the generation each one is nearest to
+        for k = 1:numel(Img.PkTot)
+            [~,gk] = min(abs(Med(2:4) - Img.PkTot(k)));
+            plot(gk + 0.3,Img.PkTot(k),'k^','MarkerFaceColor','k','MarkerSize',9)
+            text(gk + 0.42,Img.PkTot(k),sprintf('%.0f V',Img.PkTot(k)),'FontSize',8)
+        end
+    end
     xticks(0:3); xticklabels(EvName); xlim([-0.6 3.6]); box on; grid on
     ylabel('Swing since the previous extremum / V')
-    title(sprintf('Staircase: step %.0f V [%.0f, %.0f] over generations 1-3',Step,ciStep(1),ciStep(2)))
+    title(sprintf('Staircase: first step %.0f V (%.2f x), then %.0f V [%.0f, %.0f]',FirstStep,FirstStep/Step,Step,ciStep(1),ciStep(2)))
 
     nexttile; hold on
     c = Curves([Curves.Sweep] == s & [Curves.Branch] == 1);
@@ -338,13 +385,22 @@ for s = 1:numel(Sweeps)
         patch([xl(1) xl(2) xl(2) xl(1)],[W(g,1) W(g,1) W(g,2) W(g,2)],EvCol(g+1,:),'FaceAlpha',0.12, ...
               'EdgeColor','none','HandleVisibility','off')
     end
-    for k = 1:numel(c), plot(c(k).dU,c(k).C,'Color',[0.6 0.6 0.6 0.5],'HandleVisibility','off'); end
+    for k = 1:numel(c), plot(c(k).dU,c(k).C,'Color',[0.6 0.6 0.6 0.5],'LineStyle','-','Marker','none','LineWidth',0.5,'HandleVisibility','off'); end
     for g = 1:3
         ok = ~isnan(G{:,['Gen' num2str(g) '_V']});
         scatter(G{ok,['Gen' num2str(g) '_V']},G{ok,['Gen' num2str(g) '_pF']},22,EvCol(g+1,:),'filled')
     end
     xlim(xl); xlabel('Swing since the previous extremum / V'); ylabel('dQ_p/dU_r / pF'); box on; grid on
-    legend(EvName(2:4),'Location','northwest')
+    Leg = EvName(2:4);
+    if Img.Ok
+        yyaxis right
+        plot(Img.Swing,Img.Tot,'k-','LineWidth',1.6)
+        plot(Img.PkTot,interp1(Img.Swing,Img.Tot,Img.PkTot),'k^','MarkerFaceColor','k','MarkerSize',9)
+        ylabel('ICCD 337 intensity, 3 kHz (normalised)'); ylim([0 1.6]); set(gca,'YColor','k')
+        yyaxis left
+        Leg = [Leg {'ICCD 337 intensity','ICCD intensity peaks'}];
+    end
+    legend(Leg,'Location','northwest')
     title('Peaks accepted inside the dQ_p/dU_r windows (shaded)')
     SaveFigure(fig,OutDir,['GenerationStaircase_' strrep(Sweeps(s).Name,' ','')])
 end
