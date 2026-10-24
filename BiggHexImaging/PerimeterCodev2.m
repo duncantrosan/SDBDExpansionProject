@@ -12,8 +12,20 @@ clear
 close all
 
 %% ---------------- User settings ----------------
-path            = uigetdir('E:\MATLAB\MATLAB\Data\2023\FullImagingDataSet\Fulldata\12_19_23Meanenergy\BigHex\SweepOverTime\3372usSweep\Data');   % folder of frame CSVs
-BackgroundImagePath = "E:\MATLAB\MATLAB\Data\2023\FullImagingDataSet\Fulldata\12_19_23Meanenergy\BigHex\SweepOverTime\3372usSweep\BigHex2ussweep337LineBG 2023 December 19 17_28_14.csv";
+RepoRoot = fileparts(fileparts(mfilename('fullpath')));
+BigHexDir = fullfile(RepoRoot,'Data','FullImagingDataSet','Fulldata','12_19_23Meanenergy','BigHex');
+path            = fullfile(BigHexDir,'SweepOverTime','3372usSweep','Data');   % folder of frame CSVs
+if ~exist(path,'dir'), path = uigetdir(pwd,'Choose the frame CSV folder'); end
+BackgroundImagePath = fullfile(BigHexDir,'SweepOverTime','3372usSweep','BigHex2ussweep337LineBG 2023 December 19 17_28_14.csv');
+ScopeFile = fullfile(RepoRoot,'Data','ICCD_ImagingData','ExampleTraces','BigHexOscope','PlasmaOn','bighex5v3000hz_ALL.csv');
+% Gate delay -> scope time. The CSVs do not store the sweep's starting delay.
+% 'auto' puts the end of the first emission hump on a voltage extremum of
+% FirstHumpPolarity (discharge stops when |V| stops rising). The old fixed
+% 1.71628 us offset leaves the light running ~50 us past each extremum.
+ScopeTimeShift    = 'auto';      % 'auto' or a number in s (scope t = frame time + shift)
+FirstHumpPolarity = 'negative';  % paper Fig 8
+Fdrive = 3000;                   % Hz
+AmpGain = 500;                   % V/V
 PictureDt       = 2;         % us per frame
 IgnitionCountsNegative  = 3000;       % counts above background = "plasma on"
 IgnitionCountsPositive  = 1580;                             % (set from dark-frame noise: ~5-6 sigma)
@@ -22,9 +34,12 @@ MinBlobPx       = 10;        % despeckle: ignore blobs smaller than this
 RefFrameMode    = 'LightImage';   % 'union' of all frames, or an integer frame no.
                              % Use a frame like your panel clsE (all cells lit,
                              % none saturated) if you want a specific one.
-SkeletonMaskMode = 'stamp';   % Skeleton Mask mode Load,manual,interpolate
+SkeletonMaskMode = 'refined'; % 'refined' (hexagons refitted to the light by
+                              % ICCDFilterRatioEoN.m), 'load' (saved stamps, which sit
+                              % ~3.6 px left of the real hexagons), 'stamp', 'manual',
+                              % 'interpolate'
 PlotAll = 'all';             % Plot all the data
-LightImagePath = "E:\MATLAB\MATLAB\Data\2023\FullImagingDataSet\Fulldata\12_19_23Meanenergy\BigHex\LightImageBigHex 2023 December 19 17_31_04.csv";
+LightImagePath = fullfile(BigHexDir,'LightImageBigHex 2023 December 19 17_31_04.csv');
 ImageAdjustments = 'no';
 
 
@@ -82,10 +97,10 @@ if strcmp(ImageAdjustments,'yes') == 1
     ImageHandeling = struct;
     ImageHandeling.Crop = Position;
     ImageHandeling.ConversionFactor = ConversionFactor;
-    save('ImageTreatment.mat',"ImageHandeling")
+    save(fullfile(RepoRoot,'BiggHexImaging','ImageTreatment.mat'),"ImageHandeling")
     CropRect = Position;
 else
-    load('ImageTreatment.mat')   % same rotate/crop/ConversionFactor as before
+    load(fullfile(RepoRoot,'BiggHexImaging','ImageTreatment.mat'))   % same rotate/crop/ConversionFactor as before
     CropRect         = ImageHandeling.Crop;
     ConversionFactor = ImageHandeling.ConversionFactor;  % mm/px
 
@@ -141,10 +156,10 @@ if strcmp(SkeletonMaskMode,'manual') == 1
 
     Skeleton = PerimMask;
     PerimTotalPx = nnz(Skeleton);
-    save('PerimeterSkeleton.mat','Skeleton','PerimTotalPx')
+    save(fullfile(RepoRoot,'BiggHexImaging','PerimeterSkeleton.mat'),'Skeleton','PerimTotalPx')
 
 elseif strcmp(SkeletonMaskMode,'interpolate')
-    RefMask = RefImage > IgnitionCounts;
+    RefMask = RefImage > IgnitionCountsNegative;
     RefMask = bwareaopen(RefMask, MinBlobPx);
     RefMask = imclose(RefMask, strel('disk',2));
     Skeleton = bwskel(RefMask);              % 1-px-wide trace of every hex edge
@@ -154,7 +169,7 @@ elseif strcmp(SkeletonMaskMode,'interpolate')
     % keep connected skeleton pieces whose bounding box matches a single cell.
     CC = bwconncomp(Skeleton);
     S  = regionprops(CC,'BoundingBox');
-    CellSizePx =  / ConversionFactor;       % <-- rough hex cell size in mm; EDIT
+    CellSizePx = 2*4.56 / ConversionFactor;  % hex cell width, side 4.56 mm (paper)
     Keep = false(1,CC.NumObjects);
     for k = 1:CC.NumObjects
         bb = S(k).BoundingBox;
@@ -232,11 +247,18 @@ elseif strcmp(SkeletonMaskMode,'stamp') == 1
     Skeleton     = PerimMask;
     PerimTotalPx = nnz(Skeleton);
     fprintf('Total: %d hexagons + %d freehand, %d perimeter px\n', k, m, PerimTotalPx);
-    save('PerimeterSkeleton.mat', ...
+    save(fullfile(RepoRoot,'BiggHexImaging','PerimeterSkeleton.mat'), ...
          'Skeleton','PerimTotalPx','Rings','Centers','FreeRings','SideMM')
 % --------- Load previous saved skeleton
 elseif strcmp(SkeletonMaskMode,'load')
-    load('PerimeterSkeleton.mat')
+    load(fullfile(RepoRoot,'BiggHexImaging','PerimeterSkeleton.mat'))
+elseif strcmp(SkeletonMaskMode,'refined')
+    RefFile = fullfile(RepoRoot,'Data','FullImagingDataSet','Results','EoN_BigHex','HexagonGeometryRefined.mat');
+    if ~exist(RefFile,'file')
+        error('%s not found: run ImagingAnalysis/ICCDFilterRatioEoN.m (LogicSides = 1) first.',RefFile);
+    end
+    R = load(RefFile,'SkelAll');
+    Skeleton = R.SkelAll;
 end
 
 
@@ -336,11 +358,28 @@ ylabel('Plasma area / mm^2')
 xlabel('Time / \mus')
 ax = gca; ax.FontSize = 18;
 
-% Align with oscilloscope trace (same trigger offset convention as before)
-[t,v,c,tr] = OscopeReadin('');
-TriggerOffset = 1.71628e-6;                       % s, edit for this dataset
-FrameTimes = TimeIndex*1e-6 - TriggerOffset;      % s
+% Align with the oscilloscope trace
+Scope = readmatrix(ScopeFile,'NumHeaderLines',11);
+t = Scope(:,1);
+v = Scope(:,2)*AmpGain;
+dt = median(diff(t));
+vs = movmean(v,round(5e-6/dt));
+[~,iMax] = findpeaks( vs,'MinPeakDistance',round(0.6/Fdrive/dt));
+[~,iMin] = findpeaks(-vs,'MinPeakDistance',round(0.6/Fdrive/dt));
+if ischar(ScopeTimeShift) && strcmpi(ScopeTimeShift,'auto')
+    RawTot = squeeze(sum(FinalData,[2 3]))';   % all light, not the thresholded mask
+    On = RawTot > 0.01*max(RawTot);
+    HumpEnd = find(On & ~[On(2:end) false],1,'first');
+    if strcmpi(FirstHumpPolarity,'negative'), tExt = t(iMin); else, tExt = t(iMax); end
+    Cand = tExt - (TimeIndex(HumpEnd) + PictureDt)*1e-6;
+    Cand = Cand(Cand + TimeIndex(1)*1e-6 >= t(1) & Cand + (TimeIndex(end)+PictureDt)*1e-6 <= t(end));
+    [~,j] = min(abs(Cand));
+    ScopeTimeShift = Cand(j);
+end
+fprintf('Scope time shift = %.1f us\n',ScopeTimeShift*1e6);
+FrameTimes = (TimeIndex + PictureDt/2)*1e-6 + ScopeTimeShift;   % s, gate centre
 Vframe = interp1(t, v, FrameTimes, 'linear', NaN);
+VframeOld = interp1(t, v, TimeIndex*1e-6 - 1.71628e-6, 'linear', NaN);   % old offset, for comparison
 
 figure
 plot(Vframe, Zeta, 'o-', 'LineWidth', 2)
