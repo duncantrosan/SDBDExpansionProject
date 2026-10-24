@@ -29,7 +29,8 @@
 %     depend on it because the mapping is monotonic.
 
 clear
-close all
+% No 'close all': figures from this run stay open (and every figure is also
+% saved as .fig next to its .png, so it can be reopened and edited later).
 
 %% Section 1 - Options
 RepoRoot = fileparts(fileparts(mfilename('fullpath')));
@@ -42,8 +43,14 @@ SpecFile    = fullfile(RepoRoot,'Data','ICCD_ImagingData','Echelledata','Absoult
 TransFile   = fullfile(RepoRoot,'Data','Stuff','FilterTransmitance.csv');
 TreatFile   = fullfile(RepoRoot,'BiggHexImaging','ImageTreatment.mat');
 SkelFile    = fullfile(RepoRoot,'BiggHexImaging','PerimeterSkeleton.mat');
-OutDir      = fullfile(RepoRoot,'Data','FullImagingDataSet','Results','EoN_BigHex');
-CacheFile   = fullfile(OutDir,'BigHexFilterStacks.mat');
+% All results go to Output/, one folder per kind of result
+OutRoot = fullfile(RepoRoot,'Output');
+OutDir.Cache      = fullfile(OutRoot,'Cache');         % stacks, derived data, geometry
+OutDir.EoN        = fullfile(OutRoot,'EoN');           % GIF, per-gate emission and E/N
+OutDir.Sides      = fullfile(OutRoot,'SideAnalysis');  % per-side rectangles (Section 10)
+OutDir.Perimeter  = fullfile(OutRoot,'Perimeter');     % open perimeter ratio
+OutDir.Superseded = fullfile(OutRoot,'Superseded');    % Sections 8 and 9
+CacheFile   = fullfile(OutDir.Cache,'BigHexFilterStacks.mat');
 
 UseCache          = 1;          % reuse the cropped, background-subtracted stacks
 FilterFactorMode  = 'echelle';  % 'echelle' or 'legacy'
@@ -77,7 +84,7 @@ RatioMax      = 0.6;            % same cap as the original code
 EoNLimits     = [100 1000];     % Td, colour scale
 
 LogicGif      = 1;
-GifFile       = fullfile(OutDir,'BigHexEoN.gif');
+GifFile       = fullfile(OutDir.EoN,'BigHexEoN.gif');
 GifDelay      = 0.12;           % s per GIF frame
 GifFrames     = [];             % [] = every gate position
 
@@ -110,7 +117,7 @@ RefineHexagons   = 1;           % refit each stamped hexagon's centre and size t
 MaxRefinePx      = 8;           % reject a refit that moves an edge further than this
 ExtentCounts     = [1000 1000]; % [negative positive] mean 337 counts per pixel row that
                                 % still counts as plasma for the extent (Fig 3 threshold)
-DerivedFile      = fullfile(OutDir,'BigHexDerived.mat');   % everything Fig13Compare.m needs
+DerivedFile      = fullfile(OutDir.Cache,'BigHexDerived.mat');   % everything Fig13Compare.m needs
 SideTrim         = 0.15;        % share of the side length dropped at each corner
 SideDepthMM      = 2.0;         % rectangle depth into the hexagon opening, mm (extent ~1.6 mm)
 SideOutMM        = 0.4;         % rectangle depth outward over the foil edge, mm
@@ -119,7 +126,9 @@ SideLitFraction  = 0.5;         % side has ignited when this share of its edge l
 SideDelayThreshold = 4;         % us; delayed = ignites this much after the median side
 SideMatchedPct   = 95;          % matched window starts once this % of sides have ignited
 
-if ~exist(OutDir,'dir'), mkdir(OutDir); end
+for f = fieldnames(OutDir)'
+    if ~exist(OutDir.(f{1}),'dir'), mkdir(OutDir.(f{1})); end
+end
 
 %% Section 2 - Filter factors
 switch lower(FilterFactorMode)
@@ -313,10 +322,10 @@ nexttile
 plot(GateDelay,FrameEoN,'o-','LineWidth',1.5)
 ylabel('E/N / Td'); xlabel('Gate delay / \mus')
 title(sprintf('Electrode-integrated E/N (%s mode)',ContaminationMode))
-exportgraphics(gcf,fullfile(OutDir,'EmissionAndFrameEoN.png'))
+SaveFigure(gcf,OutDir.EoN,'EmissionAndFrameEoN')
 writetable(table(GateDelay(:),GateStart(:)*1e6,HalfWave(:),Tot337,Tot391,RawFrameRatio(:),FrameRatio(:),FrameEoN(:), ...
            'VariableNames',{'GateDelay_us','ScopeTime_us','HalfWave','Total337','Total391','RawRatio','CorrectedRatio','EoN_Td'}), ...
-           fullfile(OutDir,'FrameEoN.csv'));
+           fullfile(OutDir.EoN,'FrameEoN.csv'));
 
 %% Section 7 - GIF of the E/N map and the current trace
 if LogicGif == 1
@@ -326,7 +335,7 @@ if LogicGif == 1
     y_mm = ((1:Ny)-1)*ConversionFactor;
     PlotWindow = [GateStart(1) GateStart(end)+GateWidth*1e-6];
     InWin = tScope >= PlotWindow(1) & tScope <= PlotWindow(2);
-    h = figure('Color','w','Position',[100 100 640 680]);
+    h = figure('Color','w','Position',[100 100 640 680],'Name','BigHexEoN GIF (last frame)');
     for nn = GifFrames
         clf(h)
         tiledlayout(h,3,1,'TileSpacing','compact','Padding','compact')
@@ -519,9 +528,9 @@ if LogicDelayed == 1
         ylabel('337 signal (norm.)')
         xlabel('Gate delay / \mus'); legend('Other cells','Delayed cells','Location','best')
         title('Group ratio through the half-wave')
-        exportgraphics(gcf,fullfile(OutDir,sprintf('DelayedIgnitionRatio_%s.png',HWNames{hw})))
+        SaveFigure(gcf,OutDir.Superseded,['DelayedIgnitionRatio_' HWNames{hw}])
     end
-    writetable(Results,fullfile(OutDir,'DelayedIgnitionRatio.csv'));
+    writetable(Results,fullfile(OutDir.Superseded,'DelayedIgnitionRatio.csv'));
 end
 
 %% Section 9 - Delayed ignition vs 391/337 ratio, pixel by pixel
@@ -647,9 +656,9 @@ if LogicDelayedPixel == 1
         plot(GateDelay(g),GS(1,:)/max(GS(:)),'b:'); plot(GateDelay(g),GS(2,:)/max(GS(:)),'r:')
         ylabel('337 signal (norm.)'); xlabel('Gate delay / \mus')
         legend('Prompt','Delayed','Location','best'); title('Group ratio through the half-wave')
-        exportgraphics(gcf,fullfile(OutDir,sprintf('DelayedPixelRatio_%s.png',HWNames{hw})))
+        SaveFigure(gcf,OutDir.Superseded,['DelayedPixelRatio_' HWNames{hw}])
     end
-    writetable(PixSummary,fullfile(OutDir,'DelayedPixelRatio.csv'));
+    writetable(PixSummary,fullfile(OutDir.Superseded,'DelayedPixelRatio.csv'));
 end
 
 %% Section 10 - Per-side rectangles: ignition delay vs E/N, and the open perimeter ratio
@@ -737,7 +746,7 @@ if LogicSides == 1
     SideNum   = repmat((1:6)',Ncells,1);
     DepthMM   = Geo(2).DepthPx*ConversionFactor;   % depth of each extent bin from the edge
     OuterArcMM = nnz(any(cat(3,SkS.FreeRings{:}),3))*ConversionFactor;   % traced outer perimeter (Pout, Eq 14)
-    save(fullfile(OutDir,'HexagonGeometryRefined.mat'),'Centers','ApothemK','RpxK','SkelAll', ...
+    save(fullfile(OutDir.Cache,'HexagonGeometryRefined.mat'),'Centers','ApothemK','RpxK','SkelAll', ...
          'RectLabel','EdgeLabel','SideCell','SideNum','SideMid','ConversionFactor');
 
     % QC: rectangles over the time-summed 337 image
@@ -749,7 +758,7 @@ if LogicSides == 1
              'HorizontalAlignment','center')
     end
     title('Side rectangles (numbers = side within its hexagon)')
-    exportgraphics(gcf,fullfile(OutDir,'SideRectangles_QC.png'))
+    SaveFigure(gcf,OutDir.Sides,'SideRectangles_QC')
 
     % Per gate, for both geometries: lit share of each edge line, summed signals
     % in each rectangle, mean 337 intensity at each depth (the Fig 3 profile),
@@ -758,6 +767,8 @@ if LogicSides == 1
     Nd = numel(Geo(2).DepthPx);
     SideLit  = zeros(Nsides,Nframes,2);
     SideProf = zeros(Nsides,Nd,Nframes,2);
+    SideProfFNS = zeros(Nsides,Nd,Nframes);   % refitted geometry only
+    MatchStart  = nan(1,numel(HumpStart));    % first gate of each half-wave's matched window
     Zeta     = zeros(2,Nframes);
     Side337  = zeros(Nsides,Nframes);
     SideFNS  = zeros(Nsides,Nframes);
@@ -768,6 +779,10 @@ if LogicSides == 1
         Mask    = bwareaopen(S337(:,:,n) > Thr,10);
         LitBand = imdilate(Mask,strel('disk',BandWidthPx));
         a = double(S337(:,:,n));  b = double(S391(:,:,n));
+        switch lower(ContaminationMode)
+            case 'subtract', bf = b - Kappa*a;
+            case 'fraction', bf = b*Factor391Percentage;
+        end
         PlasmaArea(n) = nnz(Mask)*ConversionFactor^2;
         TotalInt(n)   = sum(a(Mask));
         for q = 1:2
@@ -778,10 +793,12 @@ if LogicSides == 1
             dm = G.DepthLabel > 0;
             SideProf(:,:,n,q) = accumarray([G.RectLabel(dm) G.DepthLabel(dm)],a(dm),[Nsides Nd]) ...
                                 ./max(G.DepthN,1);
-        end
-        switch lower(ContaminationMode)
-            case 'subtract', bf = b - Kappa*a;
-            case 'fraction', bf = b*Factor391Percentage;
+            if q == 2
+                % same profile for the corrected N2+ signal, so the ratio (and
+                % E/N) can be compared at the same distance from the edge
+                SideProfFNS(:,:,n) = accumarray([G.RectLabel(dm) G.DepthLabel(dm)],bf(dm),[Nsides Nd]) ...
+                                     ./max(G.DepthN,1);
+            end
         end
         rm = RectLabel > 0;
         Side337(:,n) = accumarray(RectLabel(rm),a(rm),[Nsides 1]);
@@ -831,6 +848,7 @@ if LogicSides == 1
         Delay    = IgnTime - median(IgnTime,'omitnan');
         Delayed  = Ignited & Delay >= SideDelayThreshold;
         MatchIdx = round(prctile(IgnIdx(Ignited),SideMatchedPct));
+        MatchStart(h) = MatchIdx;
         gm = MatchIdx:g(end);
 
         RatioMatched = SideR(SideFNS(:,gm),Side337(:,gm));
@@ -923,9 +941,9 @@ if LogicSides == 1
         xlabel('Side ignition delay / \mus'); ylabel('E/N / Td'); box on
         legend('Matched, other sides','Matched, delayed sides','Own onset (all sides)','Location','best')
         title('E/N vs ignition delay, per side')
-        exportgraphics(gcf,fullfile(OutDir,sprintf('SideIgnitionEoN_%s.png',HWNames{hw})))
+        SaveFigure(gcf,OutDir.Sides,['SideIgnitionEoN_' HWNames{hw}])
     end
-    writetable(SideTable,fullfile(OutDir,'SideIgnitionEoN.csv'));
+    writetable(SideTable,fullfile(OutDir.Sides,'SideIgnitionEoN.csv'));
 
     % Are the same sides late in both polarities?
     v = all(~isnan(DelayBoth),2);
@@ -940,7 +958,7 @@ if LogicSides == 1
     scatter(DelayBoth(v,1),DelayBoth(v,2),25,'filled','MarkerFaceAlpha',0.5); box on
     xlabel('Negative half-wave delay / \mus'); ylabel('Positive half-wave delay / \mus')
     title(sprintf('Per-side ignition delay, Spearman %.2f (p = %.2g)',rs,ps))
-    exportgraphics(gcf,fullfile(OutDir,'SideDelayNegVsPos.png'))
+    SaveFigure(gcf,OutDir.Sides,'SideDelayNegVsPos')
 
     % Open perimeter ratio through the period and against the applied voltage
     figure('Position',[50 50 1100 420])
@@ -957,10 +975,10 @@ if LogicSides == 1
     xlabel('U / V'); ylabel('\zeta'); box on
     legend(HWNames(1 + (HalfWave(HumpStart) > 0)),'Location','best')
     title(sprintf('\\zeta vs applied voltage (scope t = gate + %.0f \\mus)',ScopeTimeShift*1e6))
-    exportgraphics(gcf,fullfile(OutDir,'OpenPerimeterRatio.png'))
+    SaveFigure(gcf,OutDir.Perimeter,'OpenPerimeterRatio')
     writetable(table(GateDelay(:),VGate(:),HalfWave(:),Zeta(:), ...
                'VariableNames',{'GateDelay_us','Voltage_V','HalfWave','Zeta'}), ...
-               fullfile(OutDir,'OpenPerimeterRatio.csv'));
+               fullfile(OutDir.Perimeter,'OpenPerimeterRatio.csv'));
 
     % Cache everything derived from the images, so comparisons and figures
     % (Fig13Compare.m) can be redone in seconds without touching the stacks.
@@ -972,7 +990,8 @@ if LogicSides == 1
         'Zeta',Zeta,'ZetaOld',ZetaOld,'PlasmaArea',PlasmaArea,'TotalInt',TotalInt, ...
         'Tot337',Tot337(:)','Tot391',Tot391(:)','FrameRatio',FrameRatio,'FrameEoN',FrameEoN, ...
         'SideLit',SideLit,'SideLitOld',SideLitOld,'Side337',Side337,'SideFNS',SideFNS, ...
-        'SideProf',SideProf,'SideExtent',SideExtent,'DepthMM',DepthMM,'ExtentCounts',ExtentCounts, ...
+        'SideProf',SideProf,'SideProfFNS',SideProfFNS,'MatchStart',MatchStart, ...
+        'SideExtent',SideExtent,'DepthMM',DepthMM,'ExtentCounts',ExtentCounts, ...
         'Ncells',Ncells,'SideLengthMM',mean(RpxK)*ConversionFactor, ...
         'SideLengthOldMM',SkS.SideMM,'OuterArcMM',OuterArcMM, ...
         'SideCell',SideCell,'SideNum',SideNum,'SideMid',SideMid,'SideTable',SideTable, ...
@@ -984,6 +1003,14 @@ if LogicSides == 1
 end
 
 %% Local functions
+function SaveFigure(fig,Folder,Name)
+% Save a figure as .png and .fig and leave it open, titled with its file name.
+fig.Name = Name;
+fig.Visible = 'on';
+exportgraphics(fig,fullfile(Folder,[Name '.png']))
+savefig(fig,fullfile(Folder,[Name '.fig']))
+end
+
 function G = BuildSideGeometry(Centers,ApothemK,Ny,Nx,SideTrim,InPx,OutPx,EdgeHalfPx)
 % Label maps for the 6 side rectangles of every hexagon (see Section 10).
 %   RectLabel  - side index of each rectangle pixel

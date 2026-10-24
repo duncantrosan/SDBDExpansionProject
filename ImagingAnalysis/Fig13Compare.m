@@ -23,8 +23,9 @@ close all
 
 %% Section 1 - Options
 RepoRoot  = fileparts(fileparts(mfilename('fullpath')));
-OutDir    = fullfile(RepoRoot,'Data','FullImagingDataSet','Results','EoN_BigHex');
-D = load(fullfile(OutDir,'BigHexDerived.mat'));
+OutDir    = fullfile(RepoRoot,'Output','Fig13');
+if ~exist(OutDir,'dir'), mkdir(OutDir); end
+D = load(fullfile(RepoRoot,'Output','Cache','BigHexDerived.mat'));
 ScopeOn   = D.ScopeFile;
 ScopeOff  = fullfile(fileparts(fileparts(ScopeOn)),'PlasmaOff','bigkex1vpp3000hz_ALL.csv');
 

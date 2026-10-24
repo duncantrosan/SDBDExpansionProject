@@ -253,7 +253,7 @@ elseif strcmp(SkeletonMaskMode,'stamp') == 1
 elseif strcmp(SkeletonMaskMode,'load')
     load(fullfile(RepoRoot,'BiggHexImaging','PerimeterSkeleton.mat'))
 elseif strcmp(SkeletonMaskMode,'refined')
-    RefFile = fullfile(RepoRoot,'Data','FullImagingDataSet','Results','EoN_BigHex','HexagonGeometryRefined.mat');
+    RefFile = fullfile(RepoRoot,'Output','Cache','HexagonGeometryRefined.mat');
     if ~exist(RefFile,'file')
         error('%s not found: run ImagingAnalysis/ICCDFilterRatioEoN.m (LogicSides = 1) first.',RefFile);
     end
