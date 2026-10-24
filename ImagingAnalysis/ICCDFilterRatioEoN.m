@@ -1,10 +1,12 @@
-%% ICCD Filter Ratio and Reduced Electric Field Imaging (337 / 391 nm)
+%% ICCD Filter Ratio Imaging (337 / 391 nm)
 %
 % Repo-relative rework of ICCdFilterAnalsysisCode.m for the Big Hex 2 us
 % gate sweeps of 12/19/23 (3000 Hz, 2.5 kV, 3000 accumulations). For every
-% gate position it builds the N2+ 391 / N2 337 ratio and the reduced
-% electric field map, and optionally:
-%   LogicGif     - writes the E/N map + current trace GIF (one frame per gate)
+% gate position it builds the N2(C)/N2+(B) emission ratio map (337 nm band
+% photons over 391 nm N2+ band photons, filter corrected and anchored to the
+% echelle spectrum), and optionally:
+%   ReportEoN    - also converts the ratio to E/N with the calibration table
+%   LogicGif     - writes the ratio map + current trace GIF (one frame per gate)
 %   LogicDelayed - compares the 391/337 ratio of hexagons that ignite late
 %                  with the hexagons that ignite first, per half-wave
 %
@@ -21,8 +23,15 @@
 %     so the hexagon skeleton (PerimeterSkeleton.mat) lines up.
 %   - The GIF loop plotted the Ratio image under an E/N colorbar, opened two
 %     figures per frame and exported the empty one. Fixed.
-%   - E/N calibration (GetData, 4th order fit of column 1 vs column 6) is
-%     unchanged. NOTE: column 6 is ~k(N2+ B)/k(N2 C), so the mapping treats
+%   - Echelle anchoring (AnchorToEchelle): the 391 signal is scaled once so the
+%     electrode-integrated, full-period raw 391/337 equals the echelle's. Both
+%     instruments see the same time-integrated light, so this one factor
+%     absorbs accumulation, gain and QE differences between the two sweeps and
+%     the echelle, and the echelle's N2+ share and Kappa then apply directly.
+%   - The reported quantity is the N2(C)/N2+(B) emission ratio, which needs no
+%     kinetic model. It falls as the field rises.
+%   - E/N calibration (ReportEoN = 1; GetData, 4th order fit of column 1 vs
+%     column 6) is unchanged. NOTE: column 6 is ~k(N2+ B)/k(N2 C), so the mapping treats
 %     the corrected photon ratio as the excitation-rate ratio, with no
 %     lifetime/quenching/branching correction. Absolute E/N carries that
 %     assumption; relative comparisons (e.g. delayed vs early hexagons) do not
@@ -46,7 +55,7 @@ SkelFile    = fullfile(RepoRoot,'BiggHexImaging','PerimeterSkeleton.mat');
 % All results go to Output/, one folder per kind of result
 OutRoot = fullfile(RepoRoot,'Output');
 OutDir.Cache      = fullfile(OutRoot,'Cache');         % stacks, derived data, geometry
-OutDir.EoN        = fullfile(OutRoot,'EoN');           % GIF, per-gate emission and E/N
+OutDir.Ratio      = fullfile(OutRoot,'EmissionRatio'); % GIF, per-gate emission and ratio
 OutDir.Sides      = fullfile(OutRoot,'SideAnalysis');  % per-side rectangles (Section 10)
 OutDir.Perimeter  = fullfile(OutRoot,'Perimeter');     % open perimeter ratio
 OutDir.Superseded = fullfile(OutRoot,'Superseded');    % Sections 8 and 9
@@ -56,12 +65,13 @@ UseCache          = 1;          % reuse the cropped, background-subtracted stack
 FilterFactorMode  = 'echelle';  % 'echelle' or 'legacy'
 ContaminationMode = 'fraction'; % 'fraction' (S391*FNSFraction, the established
                                 % method) or 'subtract' (S391 - Kappa*S337).
-                                % 'subtract' is the better model but needs a
-                                % Kappa in ICCD units: the echelle Kappa (~0.19)
-                                % is larger than the raw 391/337 the ICCD sees
-                                % in the negative half-wave (~0.10), so the
-                                % echelle and the ICCD do not share a relative
-                                % 337/391 response. Calibrate that first.
+                                % 'subtract' is the better leakage model; with
+                                % AnchorToEchelle = 1 the echelle Kappa is in
+                                % the right units, but it nearly cancels the
+                                % negative half-wave's N2+ signal.
+AnchorToEchelle   = 1;          % scale ICCD 391 so the full-period raw 391/337
+                                % equals the echelle's (see header)
+ReportEoN         = 0;          % 1 = also report E/N (Td) next to the ratio
 PhotonUnits       = 1;          % echelle .spa in energy units -> photons
 KappaOverride     = [];         % set a number to override the echelle Kappa
 
@@ -80,11 +90,13 @@ CurrentGain   = 6;              % mA/V, Trek current monitor
 RatioSmoothPx = 5;              % box filter (px) on both images before the ratio
 Min337Ratio   = 1500;           % counts (after smoothing) to compute a ratio
 Min391Ratio   = 300;            % counts (after smoothing) to compute a ratio
-RatioMax      = 0.6;            % same cap as the original code
-EoNLimits     = [100 1000];     % Td, colour scale
+RatioMax      = 0.6;            % cap on N2+(B)/N2(C) (noise), same as the original code
+CBLimits      = [2 30];         % N2(C)/N2+(B) colour scale (log)
+EoNLimits     = [100 1000];     % Td, colour scale (ReportEoN = 1)
 
 LogicGif      = 1;
-GifFile       = fullfile(OutDir.EoN,'BigHexEoN.gif');
+GifFile       = fullfile(OutDir.Ratio,'BigHexEmissionRatio.gif');
+GifQuantity   = 'ratio';        % 'ratio', or 'eon' (needs ReportEoN = 1)
 GifDelay      = 0.12;           % s per GIF frame
 GifFrames     = [];             % [] = every gate position
 
@@ -138,11 +150,13 @@ case 'echelle'
     FilterFactor391     = FF.T391eff;
     Kappa               = FF.Kappa;
     Factor391Percentage = FF.FNSFraction;
+    EchelleRaw          = (FF.SPS391 + FF.FNS391)/FF.S337;   % full-period raw 391/337
 case 'legacy'
     FilterFactor337     = 0.2815;
     FilterFactor391     = 0.4134;
     Factor391Percentage = 0.4533;
     Kappa               = NaN;
+    EchelleRaw          = NaN;
 otherwise
     error('FilterFactorMode must be ''echelle'' or ''legacy''.');
 end
@@ -260,13 +274,24 @@ for h = 1:numel(HumpEnd)
             h,GateDelay(HumpStart(h)),GateDelay(HumpEnd(h)),Pol,dMax*1e6,dMin*1e6);
 end
 
-%% Section 6 - Ratio and E/N maps
+%% Section 6 - Echelle anchor and ratio maps
+Tot391 = double(squeeze(sum(S391,[1 2])));
+if AnchorToEchelle == 1 && ~isnan(EchelleRaw)
+    AnchorGain = EchelleRaw/(sum(Tot391(On))/sum(Tot337(On)));
+else
+    AnchorGain = 1;
+end
+fprintf('Echelle anchor: full-period raw 391/337 %.3f -> %.3f (391 x %.3f)\n', ...
+        sum(Tot391(On))/sum(Tot337(On)),AnchorGain*sum(Tot391(On))/sum(Tot337(On)),AnchorGain);
+
 if RatioSmoothPx > 1
     A = imboxfilt3(S337,[RatioSmoothPx RatioSmoothPx 1]);
     B = imboxfilt3(S391,[RatioSmoothPx RatioSmoothPx 1]);
 else
     A = S337;  B = S391;
 end
+Valid391 = B >= Min391Ratio;   % threshold on the measured counts, before anchoring
+B = AnchorGain*B;
 switch lower(ContaminationMode)
 case 'subtract'
     BFNS = B - Kappa*A;
@@ -282,10 +307,15 @@ case 'fraction'
 otherwise
     error('ContaminationMode must be ''subtract'' or ''fraction''.');
 end
-Ratio = (BFNS/FilterFactor391)./(A/FilterFactor337);
-Valid = A >= Min337Ratio & B >= Min391Ratio & Ratio > RatioRange(1) & Ratio < min(RatioMax,RatioRange(2));
+Ratio = (BFNS/FilterFactor391)./(A/FilterFactor337);     % N2+(B)/N2(C) photons
+Valid = A >= Min337Ratio & Valid391 & Ratio > 0 & Ratio < RatioMax;
+clear Valid391
 Ratio(~Valid) = NaN;
-EoN = polyval(EoNCoeff,Ratio);
+CB = 1./Ratio;                                            % N2(C)/N2+(B), reported
+if ReportEoN == 1
+    EoN = polyval(EoNCoeff,Ratio);
+    EoN(Ratio <= RatioRange(1) | Ratio >= RatioRange(2)) = NaN;
+end
 
 % Whole-electrode ratio per gate (sum over valid pixels, not a mean of ratios)
 FrameRatio = nan(1,Nframes);
@@ -298,8 +328,8 @@ for n = 1:Nframes
         FrameEoN(n)   = polyval(EoNCoeff,FrameRatio(n));
     end
 end
+FrameCB = 1./FrameRatio;
 
-Tot391 = double(squeeze(sum(S391,[1 2])));
 RawFrameRatio = Tot391(:)'./Tot337(:)';
 RawFrameRatio(~On) = NaN;
 
@@ -319,15 +349,19 @@ plot(GateDelay,RawFrameRatio,'o-','LineWidth',1.5)
 ylabel('Raw 391/337'); xlabel('Gate delay / \mus')
 title('Electrode-integrated raw ratio (registered, no filter correction)')
 nexttile
-plot(GateDelay,FrameEoN,'o-','LineWidth',1.5)
-ylabel('E/N / Td'); xlabel('Gate delay / \mus')
-title(sprintf('Electrode-integrated E/N (%s mode)',ContaminationMode))
-SaveFigure(gcf,OutDir.EoN,'EmissionAndFrameEoN')
-writetable(table(GateDelay(:),GateStart(:)*1e6,HalfWave(:),Tot337,Tot391,RawFrameRatio(:),FrameRatio(:),FrameEoN(:), ...
-           'VariableNames',{'GateDelay_us','ScopeTime_us','HalfWave','Total337','Total391','RawRatio','CorrectedRatio','EoN_Td'}), ...
-           fullfile(OutDir.EoN,'FrameEoN.csv'));
+plot(GateDelay,FrameCB,'o-','LineWidth',1.5)
+ylabel('N_2(C) / N_2^+(B)'); xlabel('Gate delay / \mus')
+if ReportEoN == 1
+    yyaxis right; plot(GateDelay,FrameEoN,'.-'); ylabel('E/N / Td')
+end
+title(sprintf('Electrode-integrated N_2(C)/N_2^+(B) emission ratio (%s, echelle-anchored)',ContaminationMode))
+SaveFigure(gcf,OutDir.Ratio,'EmissionAndFrameRatio')
+FrameTable = table(GateDelay(:),GateStart(:)*1e6,HalfWave(:),Tot337,Tot391,RawFrameRatio(:),FrameCB(:), ...
+           'VariableNames',{'GateDelay_us','ScopeTime_us','HalfWave','Total337','Total391','Raw391over337','N2C_over_N2pB'});
+if ReportEoN == 1, FrameTable.EoN_Td = FrameEoN(:); end
+writetable(FrameTable,fullfile(OutDir.Ratio,'FrameEmissionRatio.csv'));
 
-%% Section 7 - GIF of the E/N map and the current trace
+%% Section 7 - GIF of the ratio (or E/N) map and the current trace
 if LogicGif == 1
     if isempty(GifFrames), GifFrames = 1:Nframes; end
     if exist(GifFile,'file'), delete(GifFile); end
@@ -335,17 +369,26 @@ if LogicGif == 1
     y_mm = ((1:Ny)-1)*ConversionFactor;
     PlotWindow = [GateStart(1) GateStart(end)+GateWidth*1e-6];
     InWin = tScope >= PlotWindow(1) & tScope <= PlotWindow(2);
-    h = figure('Color','w','Position',[100 100 640 680],'Name','BigHexEoN GIF (last frame)');
+    h = figure('Color','w','Position',[100 100 640 680],'Name','BigHexEmissionRatio GIF (last frame)');
+    ShowEoN = strcmpi(GifQuantity,'eon') && ReportEoN == 1;
     for nn = GifFrames
         clf(h)
         tiledlayout(h,3,1,'TileSpacing','compact','Padding','compact')
         nexttile([2 1])
-        E = EoN(:,:,nn);
-        E(isnan(E)) = EoNLimits(1);
-        imagesc(x_mm,y_mm,E); axis image
-        colormap(parula); clim(EoNLimits)
-        a = colorbar; a.Label.String = 'Reduced Electric Field / Td';
-        xlabel('x / mm'); ylabel('y / mm'); title('EoN Data')
+        if ShowEoN
+            Q = EoN(:,:,nn);  Lim = EoNLimits;  Cmap = parula;
+            Lab = 'Reduced Electric Field / Td';  Ttl = 'EoN Data';
+        else
+            % high ratio = low field, so the map is flipped to keep bright = high field
+            Q = CB(:,:,nn);   Lim = CBLimits;   Cmap = flipud(parula);
+            Lab = 'N_2(C) / N_2^+(B) emission ratio';  Ttl = 'N_2(C) / N_2^+(B)';
+        end
+        imagesc(x_mm,y_mm,Q,'AlphaData',~isnan(Q)); axis image
+        ax = gca; ax.Color = [0.12 0.12 0.3];
+        colormap(Cmap); clim(Lim)
+        if ~ShowEoN, ax.ColorScale = 'log'; end
+        a = colorbar; a.Label.String = Lab;
+        xlabel('x / mm'); ylabel('y / mm'); title(Ttl)
         text(x_mm(10),y_mm(end-15),sprintf('Gate = %d - %d \\mus',GateDelay(nn),GateDelay(nn)+GateWidth), ...
              'Color','w','FontSize',12)
         ax = gca; ax.FontSize = 12;
@@ -365,6 +408,7 @@ if LogicGif == 1
 end
 
 %% Section 8 - Delayed ignition vs 391/337 ratio, per hexagon
+% Superseded by Section 10 and off by default; still reports E/N, unanchored.
 if LogicDelayed == 1
     Sk = load(SkelFile);
     Rings  = Sk.Rings;
@@ -534,6 +578,7 @@ if LogicDelayed == 1
 end
 
 %% Section 9 - Delayed ignition vs 391/337 ratio, pixel by pixel
+% Superseded by Section 10 and off by default; still reports E/N.
 % Two thresholds: PixelOnCounts decides which pixels ever turn on in the
 % half-wave, PixelDelayThreshold decides which of those count as delayed.
 % Ratios are sums over pixels and gates of the smoothed, registered images
@@ -773,16 +818,19 @@ if LogicSides == 1
     Side337  = zeros(Nsides,Nframes);
     SideFNS  = zeros(Nsides,Nframes);
     PlasmaArea = zeros(1,Nframes);   % mm^2
+    ArcMask    = any(cat(3,SkS.FreeRings{:}),3);   % traced outer perimeter
+    ArcLit     = zeros(1,Nframes);   % lit share of the outer perimeter
     TotalInt   = zeros(1,Nframes);   % 337 counts inside the plasma mask
     for n = 1:Nframes
         if HalfWave(n) < 0, Thr = IgnitionCountsNegative; else, Thr = IgnitionCountsPositive; end
         Mask    = bwareaopen(S337(:,:,n) > Thr,10);
         LitBand = imdilate(Mask,strel('disk',BandWidthPx));
-        a = double(S337(:,:,n));  b = double(S391(:,:,n));
+        a = double(S337(:,:,n));  b = AnchorGain*double(S391(:,:,n));
         switch lower(ContaminationMode)
             case 'subtract', bf = b - Kappa*a;
             case 'fraction', bf = b*Factor391Percentage;
         end
+        ArcLit(n)     = nnz(LitBand & ArcMask)/nnz(ArcMask);
         PlasmaArea(n) = nnz(Mask)*ConversionFactor^2;
         TotalInt(n)   = sum(a(Mask));
         for q = 1:2
@@ -828,7 +876,8 @@ if LogicSides == 1
     SideLit    = SideLit(:,:,2);
     ZetaOld    = Zeta(1,:);
     Zeta       = Zeta(2,:);
-    SideR = @(F,A) (sum(F,2)/FilterFactor391)./(sum(A,2)/FilterFactor337);
+    SideR  = @(F,A) (sum(F,2)/FilterFactor391)./(sum(A,2)/FilterFactor337);   % N2+(B)/N2(C)
+    SideCB = @(F,A) 1./SideR(F,A);                                             % N2(C)/N2+(B)
 
     HWNames = {'Negative','Positive'};
     SideTable = table;
@@ -851,24 +900,27 @@ if LogicSides == 1
         MatchStart(h) = MatchIdx;
         gm = MatchIdx:g(end);
 
-        RatioMatched = SideR(SideFNS(:,gm),Side337(:,gm));
-        RatioHW      = SideR(SideFNS(:,g),Side337(:,g));
-        RatioOnset   = nan(Nsides,1);
+        CBMatched = SideCB(SideFNS(:,gm),Side337(:,gm));
+        CBHW      = SideCB(SideFNS(:,g),Side337(:,g));
+        CBOnset   = nan(Nsides,1);
         for id = find(Ignited)'
             o = IgnIdx(id):min(IgnIdx(id)+OnsetFrames-1,g(end));
-            RatioOnset(id) = SideR(SideFNS(id,o),Side337(id,o));
+            CBOnset(id) = SideCB(SideFNS(id,o),Side337(id,o));
         end
         Signal = sum(Side337(:,g),2);
         Radius = hypot(SideMid(:,1)-mean(Centers(:,1)),SideMid(:,2)-mean(Centers(:,2)))*ConversionFactor;
         DelayBoth(:,hw) = Delay;  DelayedBoth(:,hw) = Delayed;
 
         T = table(repmat(HWNames(hw),Nsides,1),SideCell,SideNum,SideMid(:,1),SideMid(:,2),Radius,Signal, ...
-                  IgnTime,IgnVolt,Delay,Delayed, ...
-                  RatioMatched,polyval(EoNCoeff,RatioMatched),RatioOnset,polyval(EoNCoeff,RatioOnset), ...
-                  RatioHW,polyval(EoNCoeff,RatioHW), ...
+                  IgnTime,IgnVolt,Delay,Delayed,CBMatched,CBOnset,CBHW, ...
                   'VariableNames',{'HalfWave','Cell','Side','Xmid_px','Ymid_px','Radius_mm','Signal337', ...
                   'IgnitionTime_us','IgnitionVoltage_V','Delay_us','Delayed', ...
-                  'RatioMatched','EoNMatched_Td','RatioOnset','EoNOnset_Td','RatioHalfWave','EoNHalfWave_Td'});
+                  'CBMatched','CBOnset','CBHalfWave'});
+        if ReportEoN == 1
+            T.EoNMatched_Td  = polyval(EoNCoeff,1./CBMatched);
+            T.EoNOnset_Td    = polyval(EoNCoeff,1./CBOnset);
+            T.EoNHalfWave_Td = polyval(EoNCoeff,1./CBHW);
+        end
         SideTable = [SideTable; T]; %#ok<AGROW>
 
         fprintf(['\n%s half-wave, %d sides: %d ignite (median %.0f us, %.0f V); %d delayed (>= %g us ' ...
@@ -877,7 +929,7 @@ if LogicSides == 1
                  GateDelay(gm(1)),GateDelay(gm(end)));
         % A geometry error shows up as delays piling onto one side number
         fprintf('  Delayed sides by side number 1-6: %s\n',sprintf('%d ',accumarray(SideNum,Delayed)));
-        Metric = {'RatioMatched','RatioOnset','RatioHalfWave'};
+        Metric = {'CBMatched','CBOnset','CBHalfWave'};
         for q = 1:3
             r = T.(Metric{q});
             v = Ignited & ~isnan(r);
@@ -885,10 +937,9 @@ if LogicSides == 1
             [rho,prho] = corr(Delay(v),r(v),'type','Spearman');
             if numel(d) >= 3
                 p = ranksum(d,e);
-                fprintf(['  %-13s others %.4f (%.0f Td, n=%d) | delayed %.4f (%.0f Td, n=%d) | %+.1f%% | ' ...
+                fprintf(['  %-10s N2(C)/N2+(B): others %.2f (n=%d) | delayed %.2f (n=%d) | %+.1f%% | ' ...
                          'ranksum p = %.3g | Spearman(delay,ratio) %.2f (p = %.3g)\n'],Metric{q}, ...
-                         median(e),polyval(EoNCoeff,median(e)),numel(e),median(d),polyval(EoNCoeff,median(d)), ...
-                         numel(d),100*(median(d)/median(e)-1),p,rho,prho);
+                         median(e),numel(e),median(d),numel(d),100*(median(d)/median(e)-1),p,rho,prho);
             end
         end
         % Within-hexagon: each delayed side against the other sides of its own
@@ -899,7 +950,7 @@ if LogicSides == 1
             for id = find(in & Delayed)'
                 Others = in & ~Delayed;
                 if any(Others)
-                    Diff(end+1) = RatioMatched(id)/median(RatioMatched(Others)) - 1; %#ok<AGROW>
+                    Diff(end+1) = CBMatched(id)/median(CBMatched(Others)) - 1; %#ok<AGROW>
                 end
             end
         end
@@ -907,11 +958,11 @@ if LogicSides == 1
             fprintf('  Within-hexagon, matched window: delayed side vs rest of its hexagon %+.1f%% (median, n = %d, signrank p = %.3g)\n', ...
                     100*median(Diff),numel(Diff),signrank(Diff));
         end
-        v = Ignited & ~isnan(RatioMatched);
-        [rp,pp] = partialcorr(Delay(v),RatioMatched(v),[Radius(v) Signal(v)],'type','Spearman');
+        v = Ignited & ~isnan(CBMatched);
+        [rp,pp] = partialcorr(Delay(v),CBMatched(v),[Radius(v) Signal(v)],'type','Spearman');
         fprintf('  Spearman(delay, matched ratio) controlling for radius and signal: %.2f (p = %.3g)\n',rp,pp);
 
-        % Figures: side maps of delay and matched E/N, and the scatter
+        % Figures: side maps of delay and matched ratio, and the scatter
         figure('Position',[50 50 1500 480])
         tiledlayout(1,3)
         nexttile
@@ -924,26 +975,26 @@ if LogicSides == 1
         end
         title(sprintf('%s: side ignition delay (circles = delayed)',HWNames{hw}))
         nexttile
-        M = nan(Ny,Nx);  M(rm) = polyval(EoNCoeff,RatioMatched(RectLabel(rm)));
+        M = nan(Ny,Nx);  M(rm) = CBMatched(RectLabel(rm));
         imagesc(M,'AlphaData',~isnan(M)); axis image off
-        colormap(gca,parula); c = colorbar; c.Label.String = 'E/N, matched window / Td';
+        colormap(gca,flipud(parula)); c = colorbar; c.Label.String = 'N_2(C)/N_2^+(B), matched window';
         hold on
         for id = find(Delayed)'
             plot(SideMid(id,1),SideMid(id,2),'mo','MarkerSize',6,'LineWidth',1.5)
         end
-        title(sprintf('E/N per side, gates %d-%d \\mus',GateDelay(gm(1)),GateDelay(gm(end))))
+        title(sprintf('N_2(C)/N_2^+(B) per side, gates %d-%d \\mus',GateDelay(gm(1)),GateDelay(gm(end))))
         nexttile
         hold on
-        scatter(Delay(~Delayed),polyval(EoNCoeff,RatioMatched(~Delayed)),25,[0.3 0.5 0.9],'filled')
-        scatter(Delay(Delayed),polyval(EoNCoeff,RatioMatched(Delayed)),25,[0.9 0.2 0.2],'filled')
-        scatter(Delay(Ignited),polyval(EoNCoeff,RatioOnset(Ignited)),12,[0.5 0.5 0.5])
+        scatter(Delay(~Delayed),CBMatched(~Delayed),25,[0.3 0.5 0.9],'filled')
+        scatter(Delay(Delayed),CBMatched(Delayed),25,[0.9 0.2 0.2],'filled')
+        scatter(Delay(Ignited),CBOnset(Ignited),12,[0.5 0.5 0.5])
         xline(SideDelayThreshold,'k--')
-        xlabel('Side ignition delay / \mus'); ylabel('E/N / Td'); box on
+        xlabel('Side ignition delay / \mus'); ylabel('N_2(C) / N_2^+(B)'); box on
         legend('Matched, other sides','Matched, delayed sides','Own onset (all sides)','Location','best')
-        title('E/N vs ignition delay, per side')
-        SaveFigure(gcf,OutDir.Sides,['SideIgnitionEoN_' HWNames{hw}])
+        title('N_2(C)/N_2^+(B) vs ignition delay, per side')
+        SaveFigure(gcf,OutDir.Sides,['SideIgnitionRatio_' HWNames{hw}])
     end
-    writetable(SideTable,fullfile(OutDir.Sides,'SideIgnitionEoN.csv'));
+    writetable(SideTable,fullfile(OutDir.Sides,'SideIgnitionRatio.csv'));
 
     % Are the same sides late in both polarities?
     v = all(~isnan(DelayBoth),2);
@@ -988,7 +1039,10 @@ if LogicSides == 1
         'OldTriggerOffset',1.71628e-6,'ScopeFile',ScopeFile,'Fdrive',Fdrive, ...
         'AmpGain',AmpGain,'CurrentGain',CurrentGain,'ConversionFactor',ConversionFactor, ...
         'Zeta',Zeta,'ZetaOld',ZetaOld,'PlasmaArea',PlasmaArea,'TotalInt',TotalInt, ...
-        'Tot337',Tot337(:)','Tot391',Tot391(:)','FrameRatio',FrameRatio,'FrameEoN',FrameEoN, ...
+        'Tot337',Tot337(:)','Tot391',Tot391(:)','FrameRatio',FrameRatio,'FrameCB',FrameCB, ...
+        'AnchorGain',AnchorGain,'EchelleRaw',EchelleRaw,'FNSFraction',Factor391Percentage,'Kappa',Kappa, ...
+        'ArcLit',ArcLit,'ArcLenMM',nnz(bwskel(ArcMask))*ConversionFactor, ...
+        'SideLenMM',repelem(RpxK*ConversionFactor,6),'ReportEoN',ReportEoN, ...
         'SideLit',SideLit,'SideLitOld',SideLitOld,'Side337',Side337,'SideFNS',SideFNS, ...
         'SideProf',SideProf,'SideProfFNS',SideProfFNS,'MatchStart',MatchStart, ...
         'SideExtent',SideExtent,'DepthMM',DepthMM,'ExtentCounts',ExtentCounts, ...
