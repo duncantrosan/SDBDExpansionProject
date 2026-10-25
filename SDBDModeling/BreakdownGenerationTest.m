@@ -198,42 +198,47 @@ for s = 1:numel(Sweeps)
 end
 writetable(Res,fullfile(OutDir,'GenerationPeaks.csv'));
 
-%% Section 4 - Figures, one per sweep
+%% Section 4 - Figures, one graph per figure, per sweep
 for s = 1:numel(Sweeps)
-    fig = figure('Color','w','Position',[40 40 1500 900]);
-    tiledlayout(2,3,'TileSpacing','compact','Padding','compact');
     c = Curves([Curves.Sweep] == s);
     if isempty(c), continue, end
+    Tag = ['GenerationTest_' strrep(Sweeps(s).Name,' ','') '_'];
     AmpAll = [c.Amp];  Cm = parula(256);
     ColOf = @(a) Cm(1 + round(255*(a - min(AmpAll))/max(eps,max(AmpAll) - min(AmpAll))),:);
 
-    nexttile; hold on   % Fig 6 as published: against normalised Ur
+    fig = NewFigure; hold on   % Fig 6 as published: against normalised Ur
     for i = 1:numel(c), plot(c(i).U/c(i).Amp,c(i).C,'Color',ColOf(c(i).Amp)); end
     xlabel('U_r / max(U_r)'); ylabel('dQ_p/dU_r / pF'); title([Sweeps(s).Name ': as in Fig 6']); box on; grid on
     colormap(gca,Cm); clim([min(AmpAll) max(AmpAll)]); cb = colorbar; cb.Label.String = 'U_r amplitude / V';
+    SaveFigure(fig,OutDir,[Tag 'Fig6'])
 
     for p = 1:2
-        nexttile; hold on
+        Br = [upper(BrName{p}(1)) BrName{p}(2:end)];
+        fig = NewFigure; hold on
         cp = c([c.Branch] == p);
         for i = 1:numel(cp), plot(cp(i).dU,cp(i).C,'Color',ColOf(cp(i).Amp)); end
         r = Res(Res.Sweep == Sweeps(s).Name & Res.Branch == p,:);
         scatter(r.PeakSwing_V,r.Peak_pF,14,'k','filled','MarkerFaceAlpha',0.5)
         if ~isempty(Bands{s,p}), xline(Bands{s,p},'r--'); end
         xlabel('Swing since reversal |U_r - U_{r,extremum}| / V'); ylabel('dQ_p/dU_r / pF'); box on; grid on
-        title(sprintf('%s half-wave, aligned at the reversal',[upper(BrName{p}(1)) BrName{p}(2:end)]))
-        colormap(gca,Cm); clim([min(AmpAll) max(AmpAll)])
+        title(sprintf('%s %s half-wave, aligned at the reversal',Sweeps(s).Name,BrName{p}))
+        colormap(gca,Cm); clim([min(AmpAll) max(AmpAll)]); cb = colorbar; cb.Label.String = 'U_r amplitude / V';
+        SaveFigure(fig,OutDir,[Tag Br 'Aligned'])
     end
 
     r = Res(Res.Sweep == Sweeps(s).Name & Res.Branch == 1,:);
     Mk = {'o','s','^'};
-    nexttile; hold on
+    fig = NewFigure; hold on
     for q = 1:3
         rq = r(r.Band == q,:);
         scatter(rq.UrAmplitude_V,rq.PeakUr_V,24,Mk{q},'filled','MarkerFaceAlpha',0.6)
     end
     xlabel('U_r amplitude / V'); ylabel('Peak position U_r / V'); box on; grid on
-    legend('Band 1','Band 2','Band 3','Location','best'); title('Positive peaks in U_r (locked to reversal: slope -1)')
-    nexttile; hold on
+    legend('Band 1','Band 2','Band 3','Location','best')
+    title([Sweeps(s).Name ' positive peaks in U_r (locked to reversal: slope -1)'])
+    SaveFigure(fig,OutDir,[Tag 'PeakUr'])
+
+    fig = NewFigure; hold on
     for q = 1:3
         rq = r(r.Band == q,:);
         scatter(rq.UrAmplitude_V,rq.PeakSwing_V,24,Mk{q},'filled','MarkerFaceAlpha',0.6)
@@ -241,15 +246,18 @@ for s = 1:numel(Sweeps)
     cp = c([c.Branch] == 1);
     plot([cp.Amp],[cp.SwIgn],'k.','MarkerSize',10)
     xlabel('U_r amplitude / V'); ylabel('Swing since reversal / V'); box on; grid on
-    legend('Band 1','Band 2','Band 3','Ignition','Location','best'); title('Positive peaks in swing since reversal (locked: flat)')
-    nexttile; hold on
+    legend('Band 1','Band 2','Band 3','Ignition','Location','best')
+    title([Sweeps(s).Name ' positive peaks in swing since reversal (locked: flat)'])
+    SaveFigure(fig,OutDir,[Tag 'PeakSwing'])
+
+    fig = NewFigure; hold on
     for q = 1:3
         rq = r(r.Band == q,:);
         scatter(rq.UrAmplitude_V,rq.Peak_pF,24,Mk{q},'filled','MarkerFaceAlpha',0.6)
     end
     xlabel('U_r amplitude / V'); ylabel('Peak height / pF'); box on; grid on
-    legend('Band 1','Band 2','Band 3','Location','best'); title('Positive peak heights')
-    SaveFigure(fig,OutDir,['GenerationTest_' strrep(Sweeps(s).Name,' ','')])
+    legend('Band 1','Band 2','Band 3','Location','best'); title([Sweeps(s).Name ' positive peak heights'])
+    SaveFigure(fig,OutDir,[Tag 'PeakHeight'])
 end
 
 %% Section 5 - Generations gated in dQp/dUr, as a staircase in swing since reversal
@@ -337,9 +345,8 @@ for s = 1:numel(Sweeps)
     FirstStep = Med(2);
     fprintf('  first step (reversal -> generation 1) %.0f V = %.2f x the later step\n',FirstStep,FirstStep/Step);
 
-    fig = figure('Color','w','Position',[40 40 1600 520]);
-    tiledlayout(1,3,'TileSpacing','compact','Padding','compact');
-    nexttile; hold on
+    Tag = ['GenerationStaircase_' strrep(Sweeps(s).Name,' ','') '_'];
+    fig = NewFigure; hold on
     for e = 1:4
         ok = ~isnan(Ev(:,e));
         scatter(G.UrAmplitude_V(ok),Ev(ok,e),26,EvCol(e,:),'filled','MarkerFaceAlpha',0.7)
@@ -353,8 +360,9 @@ for s = 1:numel(Sweeps)
     xlabel('U_r amplitude of the previous half-wave / V'); ylabel('Swing since the previous extremum / V')
     legend(Leg,'Location','northwest'); box on; grid on
     title(sprintf('%s positive half-wave: referenced to the previous extremum',Sweeps(s).Name))
+    SaveFigure(fig,OutDir,[Tag 'VsAmplitude'])
 
-    nexttile; hold on
+    fig = NewFigure; hold on
     for e = 1:4
         ok = ~isnan(Ev(:,e));
         x = (e-1) + 0.12*randn(nnz(ok),1);
@@ -375,9 +383,11 @@ for s = 1:numel(Sweeps)
     end
     xticks(0:3); xticklabels(EvName); xlim([-0.6 3.6]); box on; grid on
     ylabel('Swing since the previous extremum / V')
-    title(sprintf('Staircase: first step %.0f V (%.2f x), then %.0f V [%.0f, %.0f]',FirstStep,FirstStep/Step,Step,ciStep(1),ciStep(2)))
+    title(sprintf('%s staircase: first step %.0f V (%.2f x), then %.0f V [%.0f, %.0f]', ...
+                  Sweeps(s).Name,FirstStep,FirstStep/Step,Step,ciStep(1),ciStep(2)))
+    SaveFigure(fig,OutDir,[Tag 'Steps'])
 
-    nexttile; hold on
+    fig = NewFigure; hold on
     c = Curves([Curves.Sweep] == s & [Curves.Branch] == 1);
     W = Sweeps(s).GenWindows;
     xl = [0 max(arrayfun(@(k) max(c(k).dU),1:numel(c)))];
@@ -401,8 +411,8 @@ for s = 1:numel(Sweeps)
         Leg = [Leg {'ICCD 337 intensity','ICCD intensity peaks'}];
     end
     legend(Leg,'Location','northwest')
-    title('Peaks accepted inside the dQ_p/dU_r windows (shaded)')
-    SaveFigure(fig,OutDir,['GenerationStaircase_' strrep(Sweeps(s).Name,' ','')])
+    title([Sweeps(s).Name ' peaks accepted inside the dQ_p/dU_r windows (shaded)'])
+    SaveFigure(fig,OutDir,[Tag 'AcceptedPeaks'])
 end
 
 %% Local functions
@@ -455,6 +465,11 @@ p  = size(g,1);
 yy = [y(end-p+1:end); y; y(1:p)];
 dd = conv(yy,-g(:,2),'same');
 dy = dd(p+1:end-p);
+end
+
+function fig = NewFigure
+% One graph per figure, all the same size
+fig = figure('Color','w','Position',[80 80 760 560]);
 end
 
 function SaveFigure(fig,Folder,Name)
