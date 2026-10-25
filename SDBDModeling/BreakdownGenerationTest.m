@@ -69,6 +69,7 @@ PeakProminence   = 25;       % pF, for the peaks in dQp/dUr
 ResrOverride     = [];       % [R1600 R3000] in Ohm to replace the off-trace Resr; NaN keeps it
 LossTangent      = 0.019;    % device tan(d) from the Hioki (SDBDCleanVersion.m); 0 = paper's Re(Z)
 IgnOnsetFrac     = 0.10;     % discharge onset = first bin at this share of the branch maximum (held)
+OriginSweep      = 1;        % sweep exported to OriginStairStep / OriginScaleddqdV (1 = 1600 Hz)
 ImagingCache     = fullfile(RepoRoot,'Output','Cache','BigHexDerived.mat');   % ICCD overlay (3 kHz imaging day)
 OnsetMinPeak     = 150;      % pF; onset only reported when the branch reaches this (below, noise sets it)
 MinGenGap        = 500;      % V of swing between accepted generations
@@ -414,6 +415,60 @@ for s = 1:numel(Sweeps)
     title([Sweeps(s).Name ' peaks accepted inside the dQ_p/dU_r windows (shaded)'])
     SaveFigure(fig,OutDir,[Tag 'AcceptedPeaks'])
 end
+
+%% Section 6 - Arrays for Origin (left in the workspace, copy and paste)
+% OriginStairStep, one row per trace (traces sorted by amplitude), NaN where
+% a column has no value:
+%   1  Ur amplitude of the previous half-wave (V)
+%   2-4  swing since the previous extremum of generations 1-3 (V)
+%   5-7  dQp/dUr height of generations 1-3 (pF)
+%   8  event index for the stair line (0 = reversal, 1-3 = generations)
+%   9  median swing of that event (V)
+%   10, 11  25th and 75th percentile of that event's swing (V)
+%   12  ICCD intensity-peak swing (V, 3 kHz imaging day)
+%   13  Ur amplitude of the imaging day (V), to plot the ICCD peaks on panel 1
+%   14  generation (1-3) nearest each ICCD peak, to plot them on the stairs
+% OriginScaleddqdV: the positive-branch charge derivative of every trace on
+% the swing-since-reversal axis, as X/Y pairs [swing1 dQ1 swing2 dQ2 ...]
+% (traces sorted by amplitude, NaN padded), then the ICCD 337 intensity as a
+% last X/Y pair (normalised). OriginScaleddqdVAmplitude lists the Ur
+% amplitude of each X/Y pair, for the legend or a colour map.
+G = sortrows(Gen(Gen.Sweep == Sweeps(OriginSweep).Name,:),'UrAmplitude_V');
+Ev = [zeros(height(G),1) G.Gen1_V G.Gen2_V G.Gen3_V];
+Med = median(Ev,1,'omitnan');
+Q25 = prctile(Ev,25,1);  Q75 = prctile(Ev,75,1);
+Q25(1) = 0;  Q75(1) = 0;
+nr = max(height(G),4);
+OriginStairStep = nan(nr,14);
+OriginStairStep(1:height(G),1:7) = [G.UrAmplitude_V G.Gen1_V G.Gen2_V G.Gen3_V G.Gen1_pF G.Gen2_pF G.Gen3_pF];
+OriginStairStep(1:4,8:11) = [(0:3)' Med' Q25' Q75'];
+if Img.Ok
+    nI = numel(Img.PkTot);
+    [~,gI] = min(abs(Med(2:4) - Img.PkTot(:)),[],2);
+    OriginStairStep(1:nI,12:14) = [Img.PkTot(:) Img.Amp*ones(nI,1) gI];
+end
+
+c = Curves([Curves.Sweep] == OriginSweep & [Curves.Branch] == 1);
+[~,ix] = sort([c.Amp]);  c = c(ix);
+nP = numel(c) + Img.Ok;
+nr = max([arrayfun(@(k) numel(c(k).dU),1:numel(c)) numel(Img.Swing)*Img.Ok]);
+OriginScaleddqdV = nan(nr,2*nP);
+for k = 1:numel(c)
+    n = numel(c(k).dU);
+    OriginScaleddqdV(1:n,2*k-1) = c(k).dU;
+    OriginScaleddqdV(1:n,2*k)   = c(k).C;
+end
+OriginScaleddqdVAmplitude = [c.Amp];
+if Img.Ok
+    n = numel(Img.Swing);
+    OriginScaleddqdV(1:n,end-1) = Img.Swing(:);
+    OriginScaleddqdV(1:n,end)   = Img.Tot(:);
+    OriginScaleddqdVAmplitude(end+1) = Img.Amp;
+end
+fprintf(['\nOrigin arrays (%s): OriginStairStep %dx%d, OriginScaleddqdV %dx%d ' ...
+         '(%d traces + ICCD as the last X/Y pair), OriginScaleddqdVAmplitude 1x%d\n'], ...
+        Sweeps(OriginSweep).Name,size(OriginStairStep),size(OriginScaleddqdV),numel(c), ...
+        numel(OriginScaleddqdVAmplitude));
 
 %% Local functions
 function [b,ci] = SlopeCI(x,y)
